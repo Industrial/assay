@@ -63,3 +63,6 @@ yarn-error.log*
 .maestro/tasks/local-history/
 .maestro/evidence/
 .maestro/runs/
+
+# Keep Nix store fixture DBs
+!crates/**/fixtures/**/*.sqlite
