@@ -150,18 +150,17 @@ tasks:
       - '**/*.rs'
     options:
       outputStyle: buffer-only-failure
-assay:
-  description: 'Run in-repo Assay DSL smoke + dogfood suites'
-  command: 'bash'
-  args:
-    - '-c'
-    - 'cargo build -p assay && ./target/debug/assay run nix/assay/tests/smoke.assay.nix && ./target/debug/assay run nix/assay/tests/dogfood.assay.nix'
-  inputs:
-    - 'Cargo.toml'
-    - 'Cargo.lock'
-    - 'crates/assay/**/*'
-    - 'nix/assay/**/*'
-  options:
-    cache: false
-    outputStyle: buffer-only-failure
-
+  assay:
+    description: 'Run in-repo Assay DSL smoke + dogfood suites'
+    command: 'bash'
+    args:
+      - '-c'
+      - 'cargo build -p nix-assay && ./target/debug/assay run nix/assay/tests/smoke.assay.nix && ./target/debug/assay run nix/assay/tests/dogfood.assay.nix'
+    inputs:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/assay/**/*'
+      - 'nix/assay/**/*'
+    options:
+      cache: false
+      outputStyle: buffer-only-failure

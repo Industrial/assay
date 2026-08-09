@@ -51,7 +51,7 @@ Weights reflect a large Home-Manager / NixOS feature tree (many colocated suites
 ## Reproduce
 
 ```bash
-devenv shell -- cargo build -p assay --release
+devenv shell -- cargo build -p nix-assay --release
 devenv shell -- ./target/release/assay run nix/assay/tests/smoke.assay.nix
 devenv shell -- ./target/release/assay run .   # full tree
 ASSAY_TRACE=1 devenv shell -- ./target/release/assay run path/to/suite.assay.nix

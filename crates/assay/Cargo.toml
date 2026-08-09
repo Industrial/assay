@@ -1,5 +1,5 @@
 [package]
-name = "assay"
+name = "nix-assay"
 version = "0.1.0"
 edition = "2024"
 authors = ["Industrial <tom.wieland@gmail.com>"]
@@ -7,7 +7,7 @@ description = "Assay — Nix unit testing: claim algebra + isolated eval runner"
 license = "MIT"
 repository = "https://github.com/Industrial/assay"
 homepage = "https://github.com/Industrial/assay"
-documentation = "https://docs.rs/assay"
+documentation = "https://docs.rs/nix-assay"
 readme = "README.md"
 keywords = ["nix", "testing", "unit-test", "dsl"]
 categories = ["development-tools", "command-line-utilities"]

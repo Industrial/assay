@@ -1,13 +1,10 @@
 name: ci
-
 on:
   push:
     branches: [main]
   pull_request:
-
 env:
   CARGO_TERM_COLOR: always
-
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -22,5 +19,5 @@ jobs:
         run: cargo test --workspace
       - name: Smoke (needs nix)
         run: |
-          cargo build -p assay --release
+          cargo build -p nix-assay --release
           ./target/release/assay run nix/assay/tests/smoke.assay.nix

@@ -11,7 +11,7 @@ pkgs.writeShellApplication {
   runtimeInputs = [cargo rustc pkgs.gcc pkgs.pkg-config pkgs.nix pkgs.git];
   text = ''
     set -euo pipefail
-    root="${DEVENV_ROOT:-}"
+    root="''${DEVENV_ROOT:-}"
     if [[ -z "$root" ]]; then
       root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
     fi
@@ -22,7 +22,7 @@ pkgs.writeShellApplication {
       exit 127
     fi
     if [[ ! -x "$bin" ]] || [[ -n "$(find "$root/crates" -name '*.rs' -newer "$bin" 2>/dev/null | head -n1)" ]]; then
-      cargo build -p assay --manifest-path "$manifest"
+      cargo build -p nix-assay --manifest-path "$manifest"
     fi
     exec "$bin" "$@"
   '';

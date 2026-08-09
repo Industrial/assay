@@ -20,7 +20,7 @@ nix run . -- run nix/assay/tests/smoke.assay.nix
 ### Cargo (crates.io)
 
 ```bash
-cargo install assay --locked
+cargo install nix-assay --locked
 assay run path/to/suite.assay.nix
 ```
 

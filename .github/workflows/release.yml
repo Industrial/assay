@@ -1,12 +1,9 @@
 name: release
-
 on:
   push:
     tags: ["v*"]
-
 permissions:
   contents: write
-
 jobs:
   build:
     strategy:
@@ -19,7 +16,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             asset: assay-aarch64-apple-darwin
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             asset: assay-x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
@@ -29,7 +26,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Build
-        run: cargo build -p assay --release --target ${{ matrix.target }}
+        run: cargo build -p nix-assay --release --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |

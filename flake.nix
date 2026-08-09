@@ -19,9 +19,13 @@
   in {
     packages = forAllSystems (system: let
       pkgs = nixpkgs.legacyPackages.${system};
-      mkCrate = name:
+      mkCrate = {
+        pname,
+        cargoPackage ? pname,
+        mainProgram ? pname,
+      }:
         pkgs.rustPlatform.buildRustPackage {
-          pname = name;
+          inherit pname;
           version = "0.1.0";
           src = pkgs.lib.cleanSourceWith {
             src = ./.;
@@ -34,23 +38,27 @@
               && base != "result";
           };
           cargoLock.lockFile = ./Cargo.lock;
-          cargoBuildFlags = ["-p" name];
-          cargoTestFlags = ["-p" name];
+          cargoBuildFlags = ["-p" cargoPackage];
+          cargoTestFlags = ["-p" cargoPackage];
           doCheck = false;
           nativeBuildInputs = [pkgs.pkg-config];
           meta = with pkgs.lib; {
-            description = "Assay workspace crate: ${name}";
+            description = "Assay workspace crate: ${cargoPackage}";
             homepage = "https://github.com/Industrial/assay";
             license = licenses.mit;
-            mainProgram = name;
+            inherit mainProgram;
           };
         };
     in {
-      assay = mkCrate "assay";
-      nixq = mkCrate "nixq";
-      nixdrv = mkCrate "nixdrv";
-      nixstore = mkCrate "nixstore";
-      nixfetch = mkCrate "nixfetch";
+      assay = mkCrate {
+        pname = "assay";
+        cargoPackage = "nix-assay";
+        mainProgram = "assay";
+      };
+      nixq = mkCrate {pname = "nixq";};
+      nixdrv = mkCrate {pname = "nixdrv";};
+      nixstore = mkCrate {pname = "nixstore";};
+      nixfetch = mkCrate {pname = "nixfetch";};
       default = self.packages.${system}.assay;
     });
 

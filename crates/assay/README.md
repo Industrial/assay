@@ -144,8 +144,8 @@ The runner maps `expr` / `expected` to internal `eq` claims. Fixtures live under
 ## Development
 
 ```bash
-cd rust && cargo test -p assay
-cd rust && cargo clippy -p assay --all-targets -- -D warnings
+cd rust && cargo test -p nix-assay
+cd rust && cargo clippy -p nix-assay --all-targets -- -D warnings
 ```
 
 Rust testing conventions for this workspace: [../TESTING.md](../TESTING.md).

@@ -2,16 +2,12 @@
 	"mcpServers": {
 		"context7": {
 			"command": "bunx",
-			"args": [
-				"@upstash/context7-mcp@latest"
-			],
+			"args": ["@upstash/context7-mcp@latest"],
 			"disabled": false
 		},
 		"figma-mcp-go": {
 			"command": "bunx",
-			"args": [
-				"@vkhanhqui/figma-mcp-go"
-			],
+			"args": ["@vkhanhqui/figma-mcp-go"],
 			"disabled": true,
 			"description": "Figma via plugin bridge (https://github.com/vkhanhqui/figma-mcp-go) — run the companion plugin in Figma Desktop"
 		},
@@ -26,17 +22,11 @@
 				"./tmp/debug-mcp-server.log"
 			],
 			"disabled": true,
-			"autoApprove": [
-				"create_debug_session",
-				"set_breakpoint",
-				"get_variables"
-			]
+			"autoApprove": ["create_debug_session", "set_breakpoint", "get_variables"]
 		},
 		"playwright": {
 			"command": "bunx",
-			"args": [
-				"@playwright/mcp@latest"
-			],
+			"args": ["@playwright/mcp@latest"],
 			"disabled": true
 		},
 		"github": {
@@ -57,17 +47,13 @@
 		},
 		"chrome-devtools": {
 			"command": "bunx",
-			"args": [
-				"chrome-devtools-mcp@latest"
-			],
+			"args": ["chrome-devtools-mcp@latest"],
 			"disabled": true
 		},
 		"postgres": {
 			"type": "stdio",
 			"command": "bash",
-			"args": [
-				"scripts/postgres-mcp-wrapper.sh"
-			],
+			"args": ["scripts/postgres-mcp-wrapper.sh"],
 			"disabled": true,
 			"description": "Postgres MCP via @yawlabs/postgres-mcp; URL from .env (MCP_POSTGRES_URL / RISK_CALCULATOR_DATABASE_URL); yb-pg -> 127.0.0.1"
 		},
@@ -87,10 +73,7 @@
 		},
 		"maestro": {
 			"command": "maestro",
-			"args": [
-				"mcp",
-				"serve"
-			],
+			"args": ["mcp", "serve"],
 			"disabled": false,
 			"description": "Maestro MCP via stdio (`maestro mcp serve`; see https://github.com/ReinaMacCredy/maestro#mcp-server)"
 		},
@@ -103,17 +86,13 @@
 		"roam-code": {
 			"type": "stdio",
 			"command": "./.devenv/profile/bin/roam",
-			"args": [
-				"mcp"
-			],
+			"args": ["mcp"],
 			"disabled": false,
 			"description": "roam-code MCP (fastmcp); run devenv shell once so .devenv/profile exists"
 		},
 		"searxng": {
 			"command": "bunx",
-			"args": [
-				"mcp-searxng"
-			],
+			"args": ["mcp-searxng"],
 			"env": {
 				"SEARXNG_URL": "http://localhost:4001"
 			},
@@ -122,10 +101,7 @@
 		},
 		"definitively": {
 			"command": "./.devenv/profile/bin/definitively",
-			"args": [
-				"mcp",
-				"serve"
-			],
+			"args": ["mcp", "serve"],
 			"disabled": true,
 			"env": {
 				"DEFINITIVELY_WORKSPACE": "${workspaceFolder}",
@@ -135,9 +111,7 @@
 		},
 		"questdb": {
 			"command": "bunx",
-			"args": [
-				"questdbmcp@latest"
-			],
+			"args": ["questdbmcp@latest"],
 			"env": {
 				"QUESTDB_HOST": "localhost",
 				"QUESTDB_PORT": "9000"
@@ -181,9 +155,7 @@
 		},
 		"docker": {
 			"command": "uvx",
-			"args": [
-				"mcp-server-docker"
-			],
+			"args": ["mcp-server-docker"],
 			"disabled": true,
 			"description": "Docker containers/logs/volumes (https://github.com/ckreiling/mcp-server-docker). Enable when debugging compose services."
 		}

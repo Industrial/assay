@@ -11,7 +11,7 @@ pkgs.writeShellApplication {
   runtimeInputs = [cargo rustc pkgs.gcc pkgs.pkg-config pkgs.nix pkgs.git];
   text = ''
     set -euo pipefail
-    root="${DEVENV_ROOT:-}"
+    root="''${DEVENV_ROOT:-}"
     if [[ -z "$root" ]]; then
       root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
     fi

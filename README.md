@@ -4,8 +4,8 @@
 (`id_effect`). Catch throws per case, compare derivations safely, and report with
 human / JSON / TAP formats.
 
-[![crates.io](https://img.shields.io/crates/v/assay.svg)](https://crates.io/crates/assay)
-[![docs.rs](https://docs.rs/assay/badge.svg)](https://docs.rs/assay)
+[![crates.io](https://img.shields.io/crates/v/nix-assay.svg)](https://crates.io/crates/nix-assay)
+[![docs.rs](https://docs.rs/nix-assay/badge.svg)](https://docs.rs/nix-assay)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Install
@@ -15,7 +15,7 @@ human / JSON / TAP formats.
 nix run github:Industrial/assay -- run path/to/suite.assay.nix
 
 # Cargo
-cargo install assay --locked
+cargo install nix-assay --locked   # installs the `assay` binary
 ```
 
 More options: [docs/install.md](docs/install.md).
@@ -59,7 +59,7 @@ assay run my-suite.assay.nix
 
 | Crate | Role |
 |-------|------|
-| [`assay`](crates/assay) | Runner CLI |
+| [`nix-assay`](crates/assay) (`assay` binary) | Runner CLI |
 | [`nixq`](crates/nixq) | JSON / attrpath query |
 | [`nixdrv`](crates/nixdrv) | Derivation helpers |
 | [`nixstore`](crates/nixstore) | Store path-info |
