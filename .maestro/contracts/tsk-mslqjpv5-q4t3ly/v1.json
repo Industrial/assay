@@ -1,0 +1,77 @@
+{
+	"schemaVersion": 2,
+	"id": "c-d9063d",
+	"taskId": "tsk-mslqjpv5-q4t3ly",
+	"repoRoot": ".",
+	"status": "locked",
+	"createdAt": "2026-08-09T11:47:35.643Z",
+	"lockedAt": "2026-08-09T11:47:35.643Z",
+	"intent": "Replace absolute id_effect path deps with crates.io/git pins",
+	"scope": {
+		"filesExpected": ["**/*"],
+		"filesForbidden": []
+	},
+	"doneWhen": [
+		{
+			"id": "dw-bc05fd",
+			"text": "A stranger with Nix + rustc can install assay via at least one documented one-liner (nix run / cargo install / GH release binary) and run a smoke suite successfully.",
+			"kind": "manual"
+		},
+		{
+			"id": "dw-c2cabe",
+			"text": "Root README.md is the public landing page: what Assay is, install matrix, 5-minute quickstart, link to full docs.",
+			"kind": "manual"
+		},
+		{
+			"id": "dw-6ccde2",
+			"text": "Nix DSL lives in-repo under nix/assay/ (vendored from ~/.dotfiles/common/assay) and is imported by the quickstart.",
+			"kind": "manual"
+		},
+		{
+			"id": "dw-4765fe",
+			"text": "Workspace crates resolve without absolute /data/Code/rust/id_effect paths (crates.io and/or git deps).",
+			"kind": "manual"
+		},
+		{
+			"id": "dw-ea230d",
+			"text": "flake.nix exposes packages.assay (and optionally nixq/nixdrv/nixstore/nixfetch) and apps.assay.",
+			"kind": "manual"
+		},
+		{
+			"id": "dw-6d875d",
+			"text": "GitHub Actions builds release binaries on tag v* and attaches linux-gnu (and darwin when feasible) artifacts.",
+			"kind": "manual"
+		},
+		{
+			"id": "dw-83046d",
+			"text": "github.com/Industrial/assay exists with origin set; tags and Releases documented.",
+			"kind": "manual"
+		},
+		{
+			"id": "dw-f65247",
+			"text": "docs/ covers install, authoring suites (DSL), CLI reference (run/discover/laws), and comparison vs nix-unit/runTests.",
+			"kind": "manual"
+		},
+		{
+			"id": "dw-d3e531",
+			"text": "cursor-setup gains opt-in cursor.features.program-assay (pinned GH release binary) plus a small dogfood suite path for .cursor/nix tests.",
+			"kind": "manual"
+		},
+		{
+			"id": "dw-581f46",
+			"text": "moon :assay (or equivalent) runs in-repo DSL smoke/dogfood suites; documented for consumers.",
+			"kind": "manual"
+		}
+	],
+	"amendments": [],
+	"createdBy": "cursor-auto",
+	"lockedBy": "cursor-auto",
+	"configSnapshot": {
+		"strict": false,
+		"overlapPolicy": "annotate",
+		"rebaseFallback": "best-effort",
+		"staleReclaimContractPolicy": "inherit"
+	},
+	"missionId": "pln-mslqjm68-f5rkwl",
+	"riskClass": "high"
+}

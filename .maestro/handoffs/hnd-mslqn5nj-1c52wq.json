@@ -1,0 +1,9 @@
+{
+	"id": "hnd-mslqn5nj-1c52wq",
+	"task_id": "tsk-mslqjpv5-q4t3ly",
+	"trigger_verb": "task:claim",
+	"created_at": "2026-08-09T11:47:35.647Z",
+	"agent_id": "cursor-auto",
+	"spec_path": "/data/Code/rust/assay/.maestro/specs/assay-public-release.md",
+	"to_agent": "cursor"
+}

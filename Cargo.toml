@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/assay",
+  "crates/nixdrv",
+  "crates/nixfetch",
+  "crates/nixq",
+  "crates/nixstore",
+]
+
+# Single version and shared metadata for all workspace crates (inherit with version.workspace = true).
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Industrial <tom.wieland@gmail.com>"]

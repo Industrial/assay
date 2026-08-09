@@ -1,0 +1,11 @@
+---
+description: Reviewer agent — scrutinize, gates, verdict, ship; flag deviations
+alwaysApply: false
+---
+
+# Agent: Reviewer
+
+- Modes: REVIEW, SHIP.
+- Scrutinize intent/trace/verify; flag plan deviations; run gates; Maestro verdict.
+- REVIEW: no feature code. SHIP: git/gh + `maestro_task_ship` / session-close.
+- FAIL → return to implementer with concrete fix list.

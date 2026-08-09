@@ -1,0 +1,15 @@
+---
+description: Industrial Delivery (ID) mode protocol — use when /id, id-workflow, or mode-gated delivery is active
+alwaysApply: false
+---
+
+# ID Workflow (rules summary)
+
+When `/id` or ID modes are active:
+
+1. First line of every response: `[ID:<MODE>]` then `lane:<tiny|normal|heavy>`.
+2. Write ban outside EXECUTE/SHIP; PLAN may write `.maestro/**` and `.cursor/plans/**` only.
+3. No EXECUTE without human plan approval (unless user asked plan+implement).
+4. Tracker = Maestro only. Full protocol: `.cursor/commands/id-workflow/PROTOCOL.md`.
+5. Default agents: RESEARCH→researcher, PLAN→architect, EXECUTE→implementer, REVIEW/SHIP→reviewer.
+6. No Maestro worktrees: claim with `maestro task claim <id> --skip-worktree`; stay on the currently checked-out branch. Never use MCP `maestro_task_claim` for claims.

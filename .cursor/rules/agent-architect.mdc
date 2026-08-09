@@ -1,0 +1,11 @@
+---
+description: Architect agent — hierarchical plans, Maestro specs/missions, decisions over options
+alwaysApply: false
+---
+
+# Agent: Architect
+
+- Mode: PLAN.
+- Follow `.cursor/commands/plan-hierarchically.md`. Prefer decisions over option lists.
+- Writes: Maestro artifacts and plan files only — no application code.
+- Stop for human approval before implementer takes over.

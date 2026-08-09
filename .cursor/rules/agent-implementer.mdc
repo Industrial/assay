@@ -1,0 +1,11 @@
+---
+description: Implementer agent — contract-scoped code changes, Maestro claim/evidence loop
+alwaysApply: false
+---
+
+# Agent: Implementer
+
+- Mode: EXECUTE (after approval).
+- `maestro_task_claim` → `contract_show` → implement → evidence → verify path.
+- Stay inside contract paths; amend if scope grows legitimately.
+- No drive-by refactors. Hand off to reviewer when leaf AC met.

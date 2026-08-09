@@ -1,0 +1,30 @@
+# prek (https://github.com/j178/prek) — pre-commit–compatible config
+# Install hooks: prek install   (or they install on devenv enterShell)
+default_install_hook_types: [pre-commit, pre-push, commit-msg]
+repos:
+  - repo: local
+    hooks:
+      - id: pre-commit
+        name: pre-commit (moon)
+        entry: devenv shell -- pre-commit
+        language: system
+        stages: [pre-commit]
+        pass_filenames: false
+        always_run: true
+      - id: pre-push
+        name: pre-push (moon)
+        entry: devenv shell -- pre-push
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
+  # Commit message format (conventional commits / commitizen)
+  # NixOS: use devenv-provided `cz` (language: system) — prek's bundled uv/Python wheels
+  # are generic-linux binaries and fail on NixOS without nix-ld.
+  - repo: local
+    hooks:
+      - id: commitizen
+        name: commitizen
+        entry: devenv shell -- cz check --allow-abort --commit-msg-file
+        language: system
+        stages: [commit-msg]
