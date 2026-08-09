@@ -9,6 +9,7 @@ repository = "https://github.com/Industrial/assay"
 homepage = "https://github.com/Industrial/assay"
 documentation = "https://docs.rs/nixfetch"
 readme = "README.md"
+exclude = ["fixtures/**"]
 keywords = ["nix", "fetch", "hash"]
 categories = ["development-tools", "command-line-utilities"]
 
