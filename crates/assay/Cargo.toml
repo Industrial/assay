@@ -43,3 +43,6 @@ path = "src/lib/mod.rs"
 [[bin]]
 name = "assay"
 path = "src/main.rs"
+
+[dev-dependencies]
+criterion = "0.8.2"

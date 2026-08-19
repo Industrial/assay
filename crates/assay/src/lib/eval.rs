@@ -9,6 +9,7 @@ use std::process::Command;
 use serde_json::Value;
 
 use crate::outcome::AssayOutcome;
+use crate::simple_eval::eval_simple_expr;
 
 /// Result of evaluating a Nix expression to JSON.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +25,26 @@ pub trait NixEval: Send + Sync {
 
 /// Back-compat alias during id_effect migration.
 pub use NixEval as EvalBackend;
+
+/// Hybrid Nix evaluator: tries simple eval first, then falls back to spawning a fresh `nix eval` process.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HybridNixEval;
+
+impl NixEval for HybridNixEval {
+  fn eval_json(&self, expr: &str) -> EvalResult {
+    // First try the simple eval for supported expressions.
+    match eval_simple_expr(expr) {
+      Ok(value) => EvalResult::Ok(value),
+      Err(()) => {
+        // If simple eval fails, fall back to the process nix eval.
+        match eval_expr_json(expr) {
+          Ok(value) => EvalResult::Ok(value),
+          Err(outcome) => EvalResult::Err(outcome),
+        }
+      }
+    }
+  }
+}
 
 /// v0 Live backend: spawn a fresh `nix eval` process per expression.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -149,13 +170,13 @@ mod tests {
 
   #[test]
   fn classify_infinite_recursion() {
-    let stderr = "error: infinite recursion encountered\n";
+    let stderr = "error: infinite recursion encountered\\n";
     assert_eq!(classify_stderr(stderr), AssayOutcome::Recursion);
   }
 
   #[test]
   fn classify_throw() {
-    let stderr = "error: boom\n";
+    let stderr = "error: boom\\n";
     assert_eq!(
       classify_stderr(stderr),
       AssayOutcome::EvalError {
@@ -184,6 +205,7 @@ mod tests {
       other => panic!("expected number, got {other:?}"),
     }
   }
+
   #[test]
   fn parse_stdout_json_roundtrip() {
     use serde_json::json;
@@ -272,8 +294,12 @@ mod tests {
       assert_eq!(ok, serde_json::json!(2));
       let err = eval_expr_json("builtins.throw \"branch-cov\"").unwrap_err();
       match err {
-        AssayOutcome::EvalError { kind, .. } => assert_eq!(kind, "throw"),
-        other => panic!("expected throw, got {other:?}"),
+        AssayOutcome::EvalError { kind, .. } => {
+          assert_eq!(kind, "throw")
+        }
+        other => {
+          panic!("expected throw, got {other:?}")
+        }
       }
     });
   }
@@ -287,10 +313,78 @@ mod tests {
       std::fs::write(&path, "builtins.throw \"file-throw\"").unwrap();
       let err = nix_eval_file(&path).unwrap_err();
       match err {
-        AssayOutcome::EvalError { kind, .. } => assert_eq!(kind, "throw"),
-        other => panic!("expected throw, got {other:?}"),
+        AssayOutcome::EvalError { kind, .. } => {
+          assert_eq!(kind, "throw")
+        }
+        other => {
+          panic!("expected throw, got {other:?}")
+        }
       }
       let _ = std::fs::remove_dir_all(dir);
     });
+  }
+
+  #[test]
+  fn hybrid_nix_eval_uses_simple_for_int() {
+    let hybrid = HybridNixEval;
+    let result = hybrid.eval_json("42");
+    assert!(matches!(result, EvalResult::Ok(_)));
+    if let EvalResult::Ok(value) = result {
+      assert_eq!(value, serde_json::json!(42));
+    }
+  }
+
+  #[test]
+  fn hybrid_nix_eval_uses_simple_for_string() {
+    let hybrid = HybridNixEval;
+    let result = hybrid.eval_json("\"hello\"");
+    assert!(matches!(result, EvalResult::Ok(_)));
+    if let EvalResult::Ok(value) = result {
+      assert_eq!(value, serde_json::json!("hello"));
+    }
+  }
+
+  #[test]
+  fn hybrid_nix_eval_uses_simple_for_add() {
+    let hybrid = HybridNixEval;
+    let result = hybrid.eval_json("1 + 1");
+    assert!(matches!(result, EvalResult::Ok(_)));
+    if let EvalResult::Ok(value) = result {
+      assert_eq!(value, serde_json::json!(2));
+    }
+  }
+
+  #[test]
+  fn hybrid_nix_eval_uses_simple_for_string_concat() {
+    let hybrid = HybridNixEval;
+    let result = hybrid.eval_json("\"foo\" + \"bar\"");
+    assert!(matches!(result, EvalResult::Ok(_)));
+    if let EvalResult::Ok(value) = result {
+      assert_eq!(value, serde_json::json!("foobar"));
+    }
+  }
+
+  #[test]
+  fn hybrid_nix_eval_fallback_to_process_for_unsupported() {
+    // This test requires nix to be installed.
+    // We'll test an expression that simple eval doesn't support but nix can.
+    let hybrid = HybridNixEval;
+    let result = hybrid.eval_json("builtins.length [1 2 3]");
+    // We expect it to fall back to process and succeed.
+    // Note: This test will be ignored if nix is not available.
+    if let EvalResult::Ok(value) = result {
+      assert_eq!(value, serde_json::json!(3));
+    } else {
+      // If nix is not available, we skip the test.
+      if std::process::Command::new("nix")
+        .arg("--version")
+        .output()
+        .is_err()
+      {
+        // Skip
+      } else {
+        panic!("expected ok from hybrid eval for builtins.length");
+      }
+    }
   }
 }

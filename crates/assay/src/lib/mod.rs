@@ -15,6 +15,7 @@ pub mod prop;
 pub mod report;
 pub mod run;
 pub mod schema;
+pub mod simple_eval;
 pub mod snapshot;
 pub mod timeout;
 pub mod verdict;
@@ -35,6 +36,7 @@ pub use pool::{MockWorkerPool, NixWorkerPool, PoolStats, SemaphoreWorkerPool};
 pub use report::{ReportFormat, report_outcomes_stdout};
 pub use run::{RunOptions, RunSummary, SuiteReport, run_discovered, run_suite, summarize};
 pub use schema::{decode_claim_json, decode_suite_cases, encode_claim_json};
+pub use snapshot::SnapshotStore;
 pub use verdict::{CaseVerdict, InfraError, exit_to_outcome, outcome_to_exit};
 
 /// Wave-0 compile gate: id_effect is linked.
