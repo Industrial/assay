@@ -20,7 +20,7 @@ sha2 = "0.10"
 thiserror = "1.0"
 hex = "0.4"
 rstest = "0.23"
-nixq = { path = "../nixq", version = "0.2.0" }
+nixq = { path = "../nixq", version = "0.2.1" }
 
 id_effect = { version = "0.4.0", features = ["schema-serde"] }
 id_effect_macro = "0.4.0"
