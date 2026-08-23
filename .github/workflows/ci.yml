@@ -21,6 +21,7 @@ jobs:
         run: |
           cargo build -p nix-assay --release
           ./target/release/assay run nix/assay/tests/smoke.assay.nix
+          ./target/release/assay run nix/assay/tests/dogfood.assay.nix
   benchmark:
     needs: test
     runs-on: ubuntu-latest
