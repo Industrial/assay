@@ -45,7 +45,7 @@ in {
     enable = lib.mkEnableOption "Assay CLI for Nix module unit tests";
     version = lib.mkOption {
       type = lib.types.str;
-      default = "0.1.0";
+      default = "0.2.1";
       description = "Assay version tag / release to pin";
     };
     releaseHash = lib.mkOption {
