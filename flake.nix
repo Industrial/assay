@@ -26,7 +26,7 @@
       }:
         pkgs.rustPlatform.buildRustPackage {
           inherit pname;
-          version = "0.2.0";
+          version = "0.2.1";
           src = pkgs.lib.cleanSourceWith {
             src = ./.;
             filter = path: type: let

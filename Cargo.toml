@@ -10,7 +10,7 @@ members = [
 
 # Single version and shared metadata for all workspace crates (inherit with version.workspace = true).
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "MIT"
 authors = ["Industrial <tom.wieland@gmail.com>"]

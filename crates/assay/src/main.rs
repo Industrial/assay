@@ -18,7 +18,8 @@ use assay::{AssayOutcome, ReportFormat, SuiteReport, report_outcomes_stdout};
 #[derive(Parser)]
 #[command(
   name = "assay",
-  about = "Nix unit testing: discover and run assay suites"
+  about = "Nix unit testing: discover and run assay suites",
+  version
 )]
 struct Cli {
   #[command(subcommand)]
