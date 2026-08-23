@@ -1,12 +1,12 @@
 [package]
 name = "nixdrv"
-version = "0.1.0"
-edition = "2024"
-authors = ["Industrial <tom.wieland@gmail.com>"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
 description = "nixdrv — derivation ATerm/JSON parse, project outs/inputs, CA store-path helpers"
-license = "MIT"
-repository = "https://github.com/Industrial/assay"
-homepage = "https://github.com/Industrial/assay"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/nixdrv"
 readme = "README.md"
 keywords = ["nix", "derivation"]
@@ -20,7 +20,7 @@ sha2 = "0.10"
 thiserror = "1.0"
 hex = "0.4"
 rstest = "0.23"
-nixq = { path = "../nixq", version = "0.1.0" }
+nixq = { path = "../nixq", version = "0.2.0" }
 
 id_effect = { version = "0.4.0", features = ["schema-serde"] }
 id_effect_macro = "0.4.0"

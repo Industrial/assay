@@ -1,12 +1,12 @@
 [package]
 name = "nixstore"
-version = "0.1.0"
-edition = "2024"
-authors = ["Industrial <tom.wieland@gmail.com>"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
 description = "nixstore — read-only Nix store path-info from db.sqlite"
-license = "MIT"
-repository = "https://github.com/Industrial/assay"
-homepage = "https://github.com/Industrial/assay"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/nixstore"
 readme = "README.md"
 keywords = ["nix", "store"]

@@ -1,12 +1,12 @@
 [package]
 name = "nixfetch"
-version = "0.1.0"
-edition = "2024"
-authors = ["Industrial <tom.wieland@gmail.com>"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
 description = "nixfetch — fixed-output fetchurl/fetchgit download + flat/NAR hash verify"
-license = "MIT"
-repository = "https://github.com/Industrial/assay"
-homepage = "https://github.com/Industrial/assay"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/nixfetch"
 readme = "README.md"
 exclude = ["fixtures/**"]
@@ -17,7 +17,7 @@ categories = ["development-tools", "command-line-utilities"]
 base64 = "0.22"
 clap = { version = "4.4", features = ["derive"] }
 hex = "0.4"
-nixdrv = { path = "../nixdrv", version = "0.1.0" }
+nixdrv = { path = "../nixdrv", version = "0.2.0" }
 reqwest = { version = "0.12", default-features = false, features = [
   "blocking",
   "rustls-tls",
