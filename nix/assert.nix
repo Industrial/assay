@@ -15,16 +15,19 @@
     if input < low || input > high
     then builtins.throw "out of range"
     else input;
-  assertListOfType = typ: list: let
-    check = x:
-      if typ == "string"
-      then
-        if !x.isString
-        then builtins.throw "not a string"
+  assertListOfType = typ: list:
+    builtins.map (
+      x:
+        if typ == "string"
+        then
+          (
+            if !builtins.isString x
+            then builtins.throw "not a string"
+            else x
+          )
         else x
-      else x;
-  in
-    list.map check list;
+    )
+    list;
   assertHasAttrs = attrs: set: let
     hasAll = builtins.all (attr: builtins.hasAttr attr set) attrs;
   in
