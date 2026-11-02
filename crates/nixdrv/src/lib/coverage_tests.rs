@@ -2,17 +2,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 
-use id_effect::{Cap, Effect, Exit, FromEnv, Needs, build_env, run_test};
+use id_effect::{Effect, Exit, expect_exit_failure, expect_exit_success, run_test};
 use serde_json::{Value, json};
 
 use crate::ca::{FileIngestionMethod, fixed_output_path, text_path};
-use crate::caps::{
-  DrvSource, DrvSourceKey, FsDrvSource, MockDrvSource, NixdrvEnv, live_providers, mock_providers,
-};
+use crate::caps::{DrvSource, DrvSourceService, FsDrvSource, NixdrvEnv};
 use crate::commands::{
-  cmd_parse, cmd_project, cmd_store_path_make_fixed, cmd_store_path_parse, derivation_to_json,
+  DerivationReport, OutputReport, parse, project_fields, store_path_make_fixed, store_path_parse,
 };
 use crate::error::{InfraError, ParseError};
 use crate::hash::{compress_hash, nix_base32_decode, nix_base32_encode};
@@ -30,19 +27,26 @@ fn fixture_path(name: &str) -> PathBuf {
     .join(name)
 }
 
-fn env_with(mock: Arc<MockDrvSource>) -> NixdrvEnv {
-  let mut raw = build_env(mock_providers()).expect("env");
-  raw.insert::<Cap<DrvSourceKey>>(mock as DrvSourceKey);
-  NixdrvEnv::from_env(raw)
+/// Runs `program` against an in-memory source holding `files` and `stdin`.
+fn run_with_source<A: Send + 'static>(
+  program: Effect<A, InfraError, NixdrvEnv>,
+  files: &[(&str, &[u8])],
+  stdin: &[u8],
+) -> Exit<A, InfraError> {
+  let mock = nixq::MockJsonSource::default();
+  for (path, body) in files {
+    mock.set_file(*path, *body);
+  }
+  mock.set_stdin(stdin);
+  run_test(program.provide(DrvSourceService(Arc::new(mock))))
 }
 
 #[test]
 fn fs_drv_source_missing_file_errors() {
-  let src = FsDrvSource;
-  let err = src
-    .read(Path::new("/nonexistent/nixdrv-coverage-missing.drv"))
-    .unwrap_err();
-  assert!(matches!(err, InfraError::Io { .. }));
+  let err = expect_exit_failure(run_test(
+    FsDrvSource.read(Path::new("/nonexistent/nixdrv-coverage-missing.drv")),
+  ));
+  assert!(matches!(err, nixq::InfraError::Io { .. }));
 }
 
 #[cfg(unix)]
@@ -66,37 +70,13 @@ fn fs_drv_source_reads_stdin_dash() {
   let pipe_fd = reader.as_raw_fd();
   assert_eq!(unsafe { dup2(pipe_fd, 0) }, 0);
 
-  let src = FsDrvSource;
-  let bytes = src.read(Path::new("-")).unwrap();
+  let bytes = expect_exit_success(run_test(FsDrvSource.read(Path::new("-"))));
   assert_eq!(bytes, b"Derive");
 
   unsafe {
     dup2(saved, 0);
     close(saved);
   }
-}
-
-#[test]
-fn live_providers_read_temp_file_via_needs() {
-  let dir = std::env::temp_dir().join(format!(
-    "nixdrv-live-{}-{}",
-    std::process::id(),
-    Instant::now().elapsed().as_nanos()
-  ));
-  std::fs::create_dir_all(&dir).unwrap();
-  let path = dir.join("live.drv");
-  std::fs::write(&path, b"Derive").unwrap();
-
-  let env = NixdrvEnv::from_env(build_env(live_providers()).expect("env"));
-  let effect: Effect<Vec<u8>, InfraError, NixdrvEnv> = Effect::new(move |env| {
-    let src = Needs::<DrvSourceKey>::need(env);
-    src.read(&path)
-  });
-  match run_test(effect, env) {
-    Exit::Success(bytes) => assert_eq!(bytes, b"Derive"),
-    other => panic!("unexpected {other:?}"),
-  }
-  let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -376,20 +356,19 @@ fn fixed_output_both_methods() {
 
 #[test]
 fn cmd_parse_whitespace_prefixed_json() {
-  let mock = Arc::new(MockDrvSource::default());
-  mock.set_file(
-    "ws.json",
-    b"  {\"outputs\":{\"out\":\"/nix/store/x\"},\"system\":\"x86_64-linux\"}",
-  );
-  let exit = run_test(cmd_parse(PathBuf::from("ws.json")), env_with(mock));
-  match exit {
-    Exit::Success(v) => assert_eq!(v["platform"], "x86_64-linux"),
-    other => panic!("unexpected {other:?}"),
-  }
+  let report = expect_exit_success(run_with_source(
+    parse("ws.json".into()),
+    &[(
+      "ws.json",
+      b"  {\"outputs\":{\"out\":\"/nix/store/x\"},\"system\":\"x86_64-linux\"}",
+    )],
+    b"",
+  ));
+  assert_eq!(report.platform, "x86_64-linux");
 }
 
 #[test]
-fn derivation_to_json_hash_algo_only() {
+fn derivation_report_hash_algo_only() {
   let mut drv = Derivation::default();
   drv.outputs.insert(
     "out".into(),
@@ -399,9 +378,9 @@ fn derivation_to_json_hash_algo_only() {
       hash: None,
     },
   );
-  let v = derivation_to_json(&drv);
-  assert_eq!(v["outputs"]["out"]["hashAlgo"], "sha256");
-  assert!(v["outputs"]["out"].get("hash").is_none());
+  let rendered = DerivationReport::from(&drv).render().expect("renders");
+  assert!(rendered.contains("\"hashAlgo\": \"sha256\""));
+  assert!(!rendered.contains("\"hash\":"));
 }
 
 #[test]
@@ -430,64 +409,85 @@ fn model_default_out_path_from_env() {
 
 #[test]
 fn cmd_parse_stdin_json() {
-  let mock = Arc::new(MockDrvSource::default());
-  mock.set_stdin(SIMPLE_JSON.as_bytes());
-  let exit = run_test(cmd_parse(PathBuf::from("-")), env_with(mock));
-  match exit {
-    Exit::Success(v) => assert_eq!(v["name"], "simple-1.0"),
-    other => panic!("unexpected {other:?}"),
-  }
+  let report = expect_exit_success(run_with_source(
+    parse("-".into()),
+    &[],
+    SIMPLE_JSON.as_bytes(),
+  ));
+  assert_eq!(report.name.as_deref(), Some("simple-1.0"));
 }
 
 #[test]
 fn cmd_parse_bad_json_fails() {
-  let mock = Arc::new(MockDrvSource::default());
-  mock.set_file("bad.json", b"not json");
-  let exit = run_test(cmd_parse(PathBuf::from("bad.json")), env_with(mock));
-  assert!(matches!(exit, Exit::Failure(_)));
+  let exit = run_with_source(parse("bad.json".into()), &[("bad.json", b"not json")], b"");
+  assert!(matches!(expect_exit_failure(exit), InfraError::Json { .. }));
+}
+
+#[test]
+fn cmd_parse_stdin_garbage_names_stdin() {
+  let err = expect_exit_failure(run_with_source(parse("-".into()), &[], b"garbage\n"));
+  assert!(matches!(err, InfraError::Json { ref input, .. } if input == "stdin"));
 }
 
 #[test]
 fn cmd_store_path_parse_fails() {
-  let exit = run_test(
-    cmd_store_path_parse("/tmp/not-store".into()),
-    env_with(Arc::new(MockDrvSource::default())),
-  );
-  assert!(matches!(exit, Exit::Failure(_)));
+  assert!(matches!(
+    expect_exit_failure(run_test(store_path_parse("/tmp/not-store".into()))),
+    InfraError::Parse(ParseError::Invalid { .. })
+  ));
 }
 
 #[test]
 fn cmd_store_path_make_fixed_unknown_method() {
-  let exit = run_test(
-    cmd_store_path_make_fixed(
-      "pkg".into(),
-      "nar".into(),
-      "sha256".into(),
-      "11".repeat(32),
-      None,
-    ),
-    env_with(Arc::new(MockDrvSource::default())),
-  );
-  assert!(matches!(exit, Exit::Failure(_)));
+  let exit = run_test(store_path_make_fixed(
+    "pkg".into(),
+    "nar".into(),
+    "sha256".into(),
+    "11".repeat(32),
+    None,
+  ));
+  assert!(matches!(
+    expect_exit_failure(exit),
+    InfraError::InvalidArg { .. }
+  ));
 }
 
 #[test]
 fn cmd_store_path_make_fixed_bad_hex() {
-  let exit = run_test(
-    cmd_store_path_make_fixed(
-      "pkg".into(),
-      "flat".into(),
-      "sha256".into(),
-      "zz".into(),
-      None,
-    ),
-    env_with(Arc::new(MockDrvSource::default())),
-  );
-  assert!(matches!(exit, Exit::Failure(_)));
+  let exit = run_test(store_path_make_fixed(
+    "pkg".into(),
+    "flat".into(),
+    "sha256".into(),
+    "zz".into(),
+    None,
+  ));
+  assert!(matches!(
+    expect_exit_failure(exit),
+    InfraError::InvalidArg { .. }
+  ));
 }
 
 #[test]
-fn derivation_to_json_with_output_hashes() {
+fn cmd_store_path_make_fixed_unsupported_algo_and_store_dir() {
+  let make = |algo: &str, store_dir: Option<String>| {
+    run_test(store_path_make_fixed(
+      "pkg".into(),
+      "recursive".into(),
+      algo.into(),
+      "11".repeat(32),
+      store_dir,
+    ))
+  };
+  assert!(matches!(
+    expect_exit_failure(make("md5", None)),
+    InfraError::Parse(_)
+  ));
+  let report = expect_exit_success(make("sha256", Some("/custom/store".into())));
+  assert!(report.path.starts_with("/custom/store/"));
+}
+
+#[test]
+fn derivation_report_with_output_hashes() {
   let mut drv = Derivation::default();
   drv.outputs.insert(
     "out".into(),
@@ -497,24 +497,24 @@ fn derivation_to_json_with_output_hashes() {
       hash: Some("abc".into()),
     },
   );
-  let v = derivation_to_json(&drv);
-  assert_eq!(v["outputs"]["out"]["path"], "/nix/store/x");
-  assert_eq!(v["outputs"]["out"]["hashAlgo"], "sha256");
-  assert_eq!(v["outputs"]["out"]["hash"], "abc");
+  assert_eq!(
+    DerivationReport::from(&drv).outputs.get("out"),
+    Some(&OutputReport::Fixed {
+      hash: Some("abc".into()),
+      hash_algo: Some("sha256".into()),
+      path: "/nix/store/x".into(),
+    })
+  );
 }
 
 #[test]
 fn cmd_project_unknown_field_ignored() {
-  let mock = Arc::new(MockDrvSource::default());
-  mock.set_file("simple.drv", SIMPLE_DRV.as_bytes());
-  let exit = run_test(
-    cmd_project(PathBuf::from("simple.drv"), vec!["nope".into()]),
-    env_with(mock),
-  );
-  match exit {
-    Exit::Success(v) => assert_eq!(v, json!({})),
-    other => panic!("unexpected {other:?}"),
-  }
+  let projection = expect_exit_success(run_with_source(
+    project_fields("simple.drv".into(), vec!["nope".into()]),
+    &[("simple.drv", SIMPLE_DRV.as_bytes())],
+    b"",
+  ));
+  assert!(projection.fields.is_empty());
 }
 
 #[test]
