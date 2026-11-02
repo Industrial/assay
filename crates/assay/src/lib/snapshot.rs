@@ -27,23 +27,26 @@ impl SnapshotStore {
     self
   }
 
-  pub fn read(&self, name: &str) -> anyhow::Result<Option<Value>> {
+  /// The golden `name` (`None` when it does not exist); errors name the golden's path.
+  pub fn read(&self, name: &str) -> Result<Option<Value>, String> {
     let path = self.golden_path(name);
     if !path.exists() {
       return Ok(None);
     }
-    let text = std::fs::read_to_string(path)?;
-    Ok(Some(serde_json::from_str(&text)?))
+    let at = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let text = std::fs::read_to_string(&path).map_err(|e| at(&e))?;
+    serde_json::from_str(&text).map(Some).map_err(|e| at(&e))
   }
 
-  pub fn write(&self, name: &str, value: &Value) -> anyhow::Result<()> {
+  /// Writes `value` as the golden `name` (pretty JSON plus newline), creating parent dirs.
+  pub fn write(&self, name: &str, value: &Value) -> Result<(), String> {
     let path = self.golden_path(name);
+    let at = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     if let Some(parent) = path.parent() {
-      std::fs::create_dir_all(parent)?;
+      std::fs::create_dir_all(parent).map_err(|e| at(&e))?;
     }
-    let text = serde_json::to_string_pretty(value)?;
-    std::fs::write(path, format!("{text}\n"))?;
-    Ok(())
+    let text = serde_json::to_string_pretty(value).map_err(|e| at(&e))?;
+    std::fs::write(&path, format!("{text}\n")).map_err(|e| at(&e))
   }
 
   pub fn assert_match(&self, name: &str, observed: &Value, update: bool) -> AssayOutcome {
@@ -95,10 +98,10 @@ fn display_path(path: &Path) -> String {
   path.display().to_string()
 }
 
-fn io_error(err: anyhow::Error) -> AssayOutcome {
+fn io_error(message: String) -> AssayOutcome {
   AssayOutcome::EvalError {
     kind: "io".into(),
-    message: err.to_string(),
+    message,
     span: None,
   }
 }
@@ -242,31 +245,5 @@ mod tests {
       AssayOutcome::Pass
     );
     assert_eq!(store.read("flagged").unwrap(), Some(value));
-  }
-}
-
-#[cfg(test)]
-mod golden_contract {
-  use id_effect::testing::snapshot::{GoldenBuilder, SnapshotAssertion, assert_golden_effect};
-  use id_effect::{Effect, succeed};
-
-  #[test]
-  fn golden_builder_assert_observed_passes_on_match() {
-    GoldenBuilder::new("assay_store_roundtrip", r#"{"ok":true}"#).assert_observed(r#"{"ok":true}"#);
-  }
-
-  fn snapshot_store_contract_effect() -> Effect<SnapshotAssertion, (), ()> {
-    succeed(SnapshotAssertion {
-      name: "assay_snapshot_store_contract",
-      observed: r#"{"via":"store"}"#.into(),
-      expected: r#"{"via":"store"}"#,
-    })
-  }
-
-  #[test]
-  fn assert_golden_effect_runs_store_contract() {
-    let snap = assert_golden_effect(snapshot_store_contract_effect(), ());
-    assert_eq!(snap.name, "assay_snapshot_store_contract");
-    assert!(snap.matches());
   }
 }

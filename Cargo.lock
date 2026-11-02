@@ -89,12 +89,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -138,15 +132,6 @@ name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
-
-[[package]]
-name = "bitmaps"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "031043d04099746d8db04daf1fa424b2bc8bd69d92b25962dcde24da39ab64a2"
-dependencies = [
- "typenum",
-]
 
 [[package]]
 name = "block-buffer"
@@ -887,15 +872,14 @@ dependencies = [
 
 [[package]]
 name = "id_effect"
-version = "0.4.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82526e3a02ceb6c6159802cd6fc217f86db8ed98ab294e98650e5a940d823768"
+checksum = "30042bd237da4b9f84f53a157abf20c0a999a5691b4e234e0cc51888454b8101"
 dependencies = [
  "flume",
  "futures",
- "id_effect_macro 0.4.0",
- "id_effect_proc_macro 0.4.0",
- "im",
+ "id_effect_macro",
+ "id_effect_proc_macro",
  "jiff",
  "proptest",
  "rayon",
@@ -905,80 +889,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "id_effect"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30042bd237da4b9f84f53a157abf20c0a999a5691b4e234e0cc51888454b8101"
-dependencies = [
- "flume",
- "futures",
- "id_effect_macro 0.13.0",
- "id_effect_proc_macro 0.13.0",
- "jiff",
- "rayon",
- "sysinfo",
- "tokio",
-]
-
-[[package]]
-name = "id_effect_cli"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5d237981984f0509d52f1f7f1ff9636fa070504bb5ceaa0890d6d2387f464af"
-dependencies = [
- "clap",
- "id_effect 0.4.0",
- "serde",
- "serde_json",
- "toml",
-]
-
-[[package]]
 name = "id_effect_cli"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e833f68a10ec6439cce232b5d10b8b0e337559c7280f4338f6c778d23a9c1462"
 dependencies = [
  "clap",
- "id_effect 0.13.0",
+ "id_effect",
  "tokio",
 ]
-
-[[package]]
-name = "id_effect_macro"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69b5bc0d9464ccd40e1e4d0833753c7d8fa51a1a27838cde1bafc4b5ca4ac397"
 
 [[package]]
 name = "id_effect_macro"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5beb87e349171f6422861291d91706561437f481c4abd032e5d1ea4c0860f00e"
-
-[[package]]
-name = "id_effect_optics"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92adc3b7cf8af6aa784c0809f633a99517bab0ffb97bf2c659f1f90b473cedb7"
-dependencies = [
- "id_effect 0.4.0",
- "im",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "id_effect_proc_macro"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30d6cedd32fc1fa75608214f2e2487388655ed374765e2802724aee3d829ac67"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
 
 [[package]]
 name = "id_effect_proc_macro"
@@ -1010,20 +935,6 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
-]
-
-[[package]]
-name = "im"
-version = "15.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0acd33ff0285af998aaf9b57342af478078f53492322fafc47450e09397e0e9"
-dependencies = [
- "bitmaps",
- "rand_core 0.6.4",
- "rand_xoshiro",
- "sized-chunks",
- "typenum",
- "version_check",
 ]
 
 [[package]]
@@ -1198,14 +1109,10 @@ dependencies = [
 name = "nix-assay"
 version = "0.2.1"
 dependencies = [
- "anyhow",
  "clap",
  "criterion",
- "id_effect 0.4.0",
- "id_effect_cli 0.4.0",
- "id_effect_macro 0.4.0",
- "id_effect_optics",
- "id_effect_proc_macro 0.4.0",
+ "id_effect",
+ "id_effect_cli",
  "nixdrv",
  "nixq",
  "nixstore",
@@ -1213,6 +1120,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]
@@ -1221,8 +1129,8 @@ version = "0.2.1"
 dependencies = [
  "clap",
  "hex",
- "id_effect 0.13.0",
- "id_effect_cli 0.13.0",
+ "id_effect",
+ "id_effect_cli",
  "nixq",
  "nixstore",
  "rstest",
@@ -1239,8 +1147,8 @@ dependencies = [
  "base64",
  "clap",
  "hex",
- "id_effect 0.13.0",
- "id_effect_cli 0.13.0",
+ "id_effect",
+ "id_effect_cli",
  "nixdrv",
  "nixstore",
  "reqwest",
@@ -1256,8 +1164,8 @@ name = "nixq"
 version = "0.2.1"
 dependencies = [
  "clap",
- "id_effect 0.13.0",
- "id_effect_cli 0.13.0",
+ "id_effect",
+ "id_effect_cli",
  "nixstore",
  "serde",
  "serde_json",
@@ -1271,8 +1179,8 @@ dependencies = [
  "base64",
  "clap",
  "hex",
- "id_effect 0.13.0",
- "id_effect_cli 0.13.0",
+ "id_effect",
+ "id_effect_cli",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1557,12 +1465,6 @@ dependencies = [
 
 [[package]]
 name = "rand_core"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
-
-[[package]]
-name = "rand_core"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
@@ -1592,15 +1494,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
 dependencies = [
  "rand_core 0.9.5",
-]
-
-[[package]]
-name = "rand_xoshiro"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f97cdb2a36ed4183de61b2f824cc45c9f1037f28afe0a322e9fff4c108b5aaa"
-dependencies = [
- "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -1906,15 +1799,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_spanned"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
-dependencies = [
- "serde_core",
-]
-
-[[package]]
 name = "serde_urlencoded"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1951,16 +1835,6 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
-]
-
-[[package]]
-name = "sized-chunks"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16d69225bde7a69b235da73377861095455d298f2b970996eec25ddbb42b3d1e"
-dependencies = [
- "bitmaps",
- "typenum",
 ]
 
 [[package]]
@@ -2194,21 +2068,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "toml"
-version = "1.1.4+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
-dependencies = [
- "indexmap",
- "serde_core",
- "serde_spanned",
- "toml_datetime",
- "toml_parser",
- "toml_writer",
- "winnow",
-]
-
-[[package]]
 name = "toml_datetime"
 version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2237,12 +2096,6 @@ checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow",
 ]
-
-[[package]]
-name = "toml_writer"
-version = "1.1.2+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tower"

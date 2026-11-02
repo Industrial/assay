@@ -1,101 +1,48 @@
-//! Isolated Nix evaluation backends.
+//! The Nix evaluation capability and the classification of `nix eval` output.
 //!
-//! **Invariant:** `Command::new("nix")` may only appear in this module (Live provider).
+//! **Invariant:** [`NixEval`] is the only way assay reaches `nix` (suite loads, batches and
+//! single claims alike); the process adapter is [`LiveNixEval`](crate::live::LiveNixEval).
 
 use std::io;
 use std::path::Path;
-use std::process::Command;
 
+use id_effect::Effect;
 use serde_json::Value;
 
 use crate::outcome::AssayOutcome;
-use crate::simple_eval::eval_simple_expr;
 
-/// Result of evaluating a Nix expression to JSON.
+/// Result of evaluating a Nix expression to JSON (what the test fakes are scripted with).
 #[derive(Debug, Clone, PartialEq)]
 pub enum EvalResult {
   Ok(Value),
   Err(AssayOutcome),
 }
 
-/// Capability for evaluating Nix expressions in isolation.
+impl EvalResult {
+  /// The result as an effect that needs nothing.
+  pub fn into_effect(self) -> Effect<Value, AssayOutcome> {
+    match self {
+      Self::Ok(v) => id_effect::succeed(v),
+      Self::Err(e) => id_effect::fail(e),
+    }
+  }
+}
+
+/// Evaluates Nix to JSON in isolation. Methods return effects that need nothing (`R = HNil`).
+///
+/// A failed evaluation fails with its outcome: `EvalError { kind: "throw" }` (nix stderr in
+/// `message`), [`AssayOutcome::Recursion`], `nix_missing`, `io` or `json`.
 pub trait NixEval: Send + Sync {
-  fn eval_json(&self, expr: &str) -> EvalResult;
+  /// `nix eval --impure --expr {expr} --json`.
+  fn eval_expr(&self, expr: &str) -> Effect<Value, AssayOutcome>;
+  /// `nix eval --impure --file {path} --json` (suite loads).
+  fn eval_file(&self, path: &Path) -> Effect<Value, AssayOutcome>;
+  /// Evaluates Nix `source` too large for `--expr` (mega-batches exceed `ARG_MAX`).
+  fn eval_source(&self, source: &str) -> Effect<Value, AssayOutcome>;
 }
 
-/// Back-compat alias during id_effect migration.
-pub use NixEval as EvalBackend;
-
-/// Hybrid Nix evaluator: tries simple eval first, then falls back to spawning a fresh `nix eval` process.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct HybridNixEval;
-
-impl NixEval for HybridNixEval {
-  fn eval_json(&self, expr: &str) -> EvalResult {
-    // First try the simple eval for supported expressions.
-    match eval_simple_expr(expr) {
-      Ok(value) => EvalResult::Ok(value),
-      Err(()) => {
-        // If simple eval fails, fall back to the process nix eval.
-        match eval_expr_json(expr) {
-          Ok(value) => EvalResult::Ok(value),
-          Err(outcome) => EvalResult::Err(outcome),
-        }
-      }
-    }
-  }
-}
-
-/// v0 Live backend: spawn a fresh `nix eval` process per expression.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct ProcessNixEval;
-
-impl NixEval for ProcessNixEval {
-  fn eval_json(&self, expr: &str) -> EvalResult {
-    match eval_expr_json(expr) {
-      Ok(value) => EvalResult::Ok(value),
-      Err(outcome) => EvalResult::Err(outcome),
-    }
-  }
-}
-
-/// Evaluate a Nix expression string to JSON.
-pub(crate) fn eval_expr_json(expr: &str) -> Result<Value, AssayOutcome> {
-  let output = spawn_nix_eval(expr)?;
-  if output.status.success() {
-    return parse_stdout_json(&output.stdout);
-  }
-  let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-  Err(classify_stderr(&stderr))
-}
-
-/// Evaluate a Nix file to JSON (suite load path).
-pub fn nix_eval_file(path: &Path) -> Result<Value, AssayOutcome> {
-  let output = spawn_nix_eval_file(path)?;
-  if output.status.success() {
-    return parse_stdout_json(&output.stdout);
-  }
-  let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-  Err(classify_stderr(&stderr))
-}
-
-fn spawn_nix_eval(expr: &str) -> Result<std::process::Output, AssayOutcome> {
-  Command::new("nix")
-    .args(["eval", "--impure", "--expr", expr, "--json"])
-    .output()
-    .map_err(nix_spawn_error)
-}
-
-fn spawn_nix_eval_file(path: &Path) -> Result<std::process::Output, AssayOutcome> {
-  Command::new("nix")
-    .args(["eval", "--impure", "--file"])
-    .arg(path)
-    .arg("--json")
-    .output()
-    .map_err(|err| nix_spawn_error_for_path(err, path))
-}
-
-fn nix_spawn_error(err: io::Error) -> AssayOutcome {
+/// The outcome for a `nix` that could not be started.
+pub(crate) fn nix_spawn_error(err: &io::Error) -> AssayOutcome {
   if err.kind() == io::ErrorKind::NotFound {
     return AssayOutcome::EvalError {
       kind: "nix_missing".to_string(),
@@ -110,22 +57,31 @@ fn nix_spawn_error(err: io::Error) -> AssayOutcome {
   }
 }
 
-fn nix_spawn_error_for_path(err: io::Error, path: &Path) -> AssayOutcome {
-  if err.kind() == io::ErrorKind::NotFound {
-    return AssayOutcome::EvalError {
-      kind: "nix_missing".to_string(),
-      message: "nix executable not found in PATH".to_string(),
+/// [`nix_spawn_error`] naming the file being evaluated.
+pub(crate) fn nix_spawn_error_for_path(err: &io::Error, path: &Path) -> AssayOutcome {
+  match nix_spawn_error(err) {
+    AssayOutcome::EvalError { kind, .. } if kind == "io" => AssayOutcome::EvalError {
+      kind,
+      message: format!("run nix eval on {}: {err}", path.display()),
       span: None,
-    };
-  }
-  AssayOutcome::EvalError {
-    kind: "io".to_string(),
-    message: format!("run nix eval on {}: {err}", path.display()),
-    span: None,
+    },
+    other => other,
   }
 }
 
-fn parse_stdout_json(stdout: &[u8]) -> Result<Value, AssayOutcome> {
+/// A finished `nix eval`: its JSON stdout on success, else its classified stderr.
+pub(crate) fn eval_output(
+  success: bool,
+  stdout: &[u8],
+  stderr: &[u8],
+) -> Result<Value, AssayOutcome> {
+  if success {
+    return parse_stdout_json(stdout);
+  }
+  Err(classify_stderr(&String::from_utf8_lossy(stderr)))
+}
+
+pub(crate) fn parse_stdout_json(stdout: &[u8]) -> Result<Value, AssayOutcome> {
   serde_json::from_slice(stdout).map_err(|err| AssayOutcome::EvalError {
     kind: "json".to_string(),
     message: err.to_string(),
@@ -148,25 +104,6 @@ pub(crate) fn classify_stderr(stderr: &str) -> AssayOutcome {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::cell::Cell;
-
-  thread_local! {
-      static FORCE_SKIP_NIX: Cell<bool> = const { Cell::new(false) };
-  }
-
-  fn skip_if_no_nix() -> bool {
-    if FORCE_SKIP_NIX.with(|flag| flag.get()) {
-      return true;
-    }
-    Command::new("nix").arg("--version").output().is_err()
-  }
-
-  fn run_if_nix(f: impl FnOnce()) {
-    if skip_if_no_nix() {
-      return;
-    }
-    f();
-  }
 
   #[test]
   fn classify_infinite_recursion() {
@@ -188,25 +125,6 @@ mod tests {
   }
 
   #[test]
-  #[ignore = "requires nix in PATH"]
-  fn nix_throw_isolated_per_call() {
-    let backend = ProcessNixEval;
-    let thrown = backend.eval_json("builtins.throw \"boom\"");
-    match thrown {
-      EvalResult::Err(AssayOutcome::EvalError { kind, .. }) => {
-        assert_eq!(kind, "throw");
-      }
-      other => panic!("expected throw, got {other:?}"),
-    }
-
-    let ok = backend.eval_json("1 + 1");
-    match ok {
-      EvalResult::Ok(Value::Number(_)) => {}
-      other => panic!("expected number, got {other:?}"),
-    }
-  }
-
-  #[test]
   fn parse_stdout_json_roundtrip() {
     use serde_json::json;
     let v = parse_stdout_json(br#"{"a":1}"#).expect("parse");
@@ -216,14 +134,22 @@ mod tests {
   }
 
   #[test]
+  fn eval_output_splits_success_and_stderr() {
+    assert_eq!(eval_output(true, b"2", b""), Ok(serde_json::json!(2)));
+    assert!(matches!(
+      eval_output(false, b"", b"error: boom"),
+      Err(AssayOutcome::EvalError { kind, .. }) if kind == "throw"
+    ));
+  }
+
+  #[test]
   fn nix_spawn_error_not_found() {
-    use std::io;
-    let err = nix_spawn_error(io::Error::new(io::ErrorKind::NotFound, "nix"));
+    let err = nix_spawn_error(&io::Error::new(io::ErrorKind::NotFound, "nix"));
     match err {
       AssayOutcome::EvalError { kind, .. } => assert_eq!(kind, "nix_missing"),
       other => panic!("expected nix_missing, got {other:?}"),
     }
-    let err2 = nix_spawn_error(io::Error::new(io::ErrorKind::PermissionDenied, "x"));
+    let err2 = nix_spawn_error(&io::Error::new(io::ErrorKind::PermissionDenied, "x"));
     match err2 {
       AssayOutcome::EvalError { kind, .. } => assert_eq!(kind, "io"),
       other => panic!("expected io, got {other:?}"),
@@ -232,159 +158,19 @@ mod tests {
 
   #[test]
   fn nix_spawn_error_for_path_variants() {
-    use std::io;
-    use std::path::Path;
     let p = Path::new("/no/such/file.nix");
-    let err = nix_spawn_error_for_path(io::Error::new(io::ErrorKind::NotFound, "nix"), p);
+    let err = nix_spawn_error_for_path(&io::Error::new(io::ErrorKind::NotFound, "nix"), p);
     match err {
       AssayOutcome::EvalError { kind, .. } => assert_eq!(kind, "nix_missing"),
       other => panic!("expected nix_missing, got {other:?}"),
     }
-    let err2 = nix_spawn_error_for_path(io::Error::other("x"), p);
+    let err2 = nix_spawn_error_for_path(&io::Error::other("x"), p);
     match err2 {
-      AssayOutcome::EvalError { kind, .. } => assert_eq!(kind, "io"),
+      AssayOutcome::EvalError { kind, message, .. } => {
+        assert_eq!(kind, "io");
+        assert!(message.contains("/no/such/file.nix"));
+      }
       other => panic!("expected io, got {other:?}"),
-    }
-  }
-
-  #[test]
-  fn process_nix_eval_exercises_spawn_path() {
-    let backend = ProcessNixEval;
-    let _ = backend.eval_json("null");
-  }
-
-  #[test]
-  fn nix_eval_file_missing_path_returns_err() {
-    use std::path::Path;
-    let path = Path::new("/tmp/assay-no-such-nix-file-xyz.nix");
-    assert!(nix_eval_file(path).is_err());
-  }
-
-  #[test]
-  fn skip_if_no_nix_true_when_forced() {
-    FORCE_SKIP_NIX.with(|flag| flag.set(true));
-    assert!(skip_if_no_nix());
-    FORCE_SKIP_NIX.with(|flag| flag.set(false));
-  }
-
-  #[test]
-  fn run_if_nix_noops_when_forced_skip() {
-    FORCE_SKIP_NIX.with(|flag| flag.set(true));
-    run_if_nix(|| panic!("should not run"));
-    FORCE_SKIP_NIX.with(|flag| flag.set(false));
-  }
-
-  #[test]
-  fn nix_eval_file_succeeds_when_nix_available() {
-    run_if_nix(|| {
-      let dir = std::env::temp_dir().join(format!("assay-nix-eval-ok-{}", std::process::id()));
-      std::fs::create_dir_all(&dir).unwrap();
-      let path = dir.join("value.nix");
-      std::fs::write(&path, "42").unwrap();
-      let value = nix_eval_file(&path).expect("nix eval file");
-      assert_eq!(value, serde_json::json!(42));
-      let _ = std::fs::remove_dir_all(dir);
-    });
-  }
-
-  #[test]
-  fn eval_expr_json_live_ok_and_throw_stderr() {
-    run_if_nix(|| {
-      let ok = eval_expr_json("1 + 1").expect("eval");
-      assert_eq!(ok, serde_json::json!(2));
-      let err = eval_expr_json("builtins.throw \"branch-cov\"").unwrap_err();
-      match err {
-        AssayOutcome::EvalError { kind, .. } => {
-          assert_eq!(kind, "throw")
-        }
-        other => {
-          panic!("expected throw, got {other:?}")
-        }
-      }
-    });
-  }
-
-  #[test]
-  fn nix_eval_file_throw_when_nix_available() {
-    run_if_nix(|| {
-      let dir = std::env::temp_dir().join(format!("assay-nix-throw-{}", std::process::id()));
-      std::fs::create_dir_all(&dir).unwrap();
-      let path = dir.join("throw.nix");
-      std::fs::write(&path, "builtins.throw \"file-throw\"").unwrap();
-      let err = nix_eval_file(&path).unwrap_err();
-      match err {
-        AssayOutcome::EvalError { kind, .. } => {
-          assert_eq!(kind, "throw")
-        }
-        other => {
-          panic!("expected throw, got {other:?}")
-        }
-      }
-      let _ = std::fs::remove_dir_all(dir);
-    });
-  }
-
-  #[test]
-  fn hybrid_nix_eval_uses_simple_for_int() {
-    let hybrid = HybridNixEval;
-    let result = hybrid.eval_json("42");
-    assert!(matches!(result, EvalResult::Ok(_)));
-    if let EvalResult::Ok(value) = result {
-      assert_eq!(value, serde_json::json!(42));
-    }
-  }
-
-  #[test]
-  fn hybrid_nix_eval_uses_simple_for_string() {
-    let hybrid = HybridNixEval;
-    let result = hybrid.eval_json("\"hello\"");
-    assert!(matches!(result, EvalResult::Ok(_)));
-    if let EvalResult::Ok(value) = result {
-      assert_eq!(value, serde_json::json!("hello"));
-    }
-  }
-
-  #[test]
-  fn hybrid_nix_eval_uses_simple_for_add() {
-    let hybrid = HybridNixEval;
-    let result = hybrid.eval_json("1 + 1");
-    assert!(matches!(result, EvalResult::Ok(_)));
-    if let EvalResult::Ok(value) = result {
-      assert_eq!(value, serde_json::json!(2));
-    }
-  }
-
-  #[test]
-  fn hybrid_nix_eval_uses_simple_for_string_concat() {
-    let hybrid = HybridNixEval;
-    let result = hybrid.eval_json("\"foo\" + \"bar\"");
-    assert!(matches!(result, EvalResult::Ok(_)));
-    if let EvalResult::Ok(value) = result {
-      assert_eq!(value, serde_json::json!("foobar"));
-    }
-  }
-
-  #[test]
-  fn hybrid_nix_eval_fallback_to_process_for_unsupported() {
-    // This test requires nix to be installed.
-    // We'll test an expression that simple eval doesn't support but nix can.
-    let hybrid = HybridNixEval;
-    let result = hybrid.eval_json("builtins.length [1 2 3]");
-    // We expect it to fall back to process and succeed.
-    // Note: This test will be ignored if nix is not available.
-    if let EvalResult::Ok(value) = result {
-      assert_eq!(value, serde_json::json!(3));
-    } else {
-      // If nix is not available, we skip the test.
-      if std::process::Command::new("nix")
-        .arg("--version")
-        .output()
-        .is_err()
-      {
-        // Skip
-      } else {
-        panic!("expected ok from hybrid eval for builtins.length");
-      }
     }
   }
 }

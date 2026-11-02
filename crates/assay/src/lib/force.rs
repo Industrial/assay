@@ -4,7 +4,6 @@
 //! [`force_support`] reports that limitation; [`check_forces`] returns **Fail**, never Pass,
 //! until a backend can observe forced attrpaths.
 
-use crate::eval::EvalBackend;
 use crate::outcome::AssayOutcome;
 
 /// Whether the active evaluator can report forced attribute paths.
@@ -40,28 +39,17 @@ fn check_forces_with_support(support: ForceSupport, paths: &[String]) -> AssayOu
   }
 }
 
-pub fn check_forces(_expr: &str, paths: &[String], _eval: &dyn EvalBackend) -> AssayOutcome {
+pub fn check_forces(_expr: &str, paths: &[String]) -> AssayOutcome {
   check_forces_with_support(force_support(), paths)
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::eval::{EvalBackend, EvalResult};
-  use serde_json::json;
-
-  struct NoopEval;
-
-  impl EvalBackend for NoopEval {
-    fn eval_json(&self, _expr: &str) -> EvalResult {
-      EvalResult::Ok(json!(null))
-    }
-  }
 
   #[test]
   fn check_forces_public_entry_uses_unsupported_backend() {
-    let eval = NoopEval;
-    let out = check_forces("x", &["p".into()], &eval);
+    let out = check_forces("x", &["p".into()]);
     match out {
       AssayOutcome::Fail { .. } => {}
       other => panic!("expected Fail, got {other:?}"),
@@ -78,8 +66,7 @@ mod tests {
 
   #[test]
   fn check_forces_fails_not_pass() {
-    let eval = NoopEval;
-    let out = check_forces("x", &["a".into()], &eval);
+    let out = check_forces("x", &["a".into()]);
     match out {
       AssayOutcome::Fail { diff, .. } => assert!(
         diff.contains("UNSUPPORTED"),

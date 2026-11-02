@@ -1,9 +1,15 @@
 //! nix-unit / `lib.runTests` compatibility: load `{ name = { expr; expected; }; }` suites.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::{Context, bail};
+use id_effect::{Effect, fail, suspend};
+use nixstore::edge::from_result;
 use serde_json::Value;
+
+use crate::assay_suite::nix_eval_failed;
+use crate::eval::NixEval;
+use crate::verdict::InfraError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompatCase {
@@ -34,43 +40,51 @@ pub fn to_claim(case: &CompatCase) -> CompatClaim {
 }
 
 /// Parse a JSON object mapping test names to `{ expr, expected }`.
-pub fn parse_compat_json(v: &Value) -> anyhow::Result<CompatSuite> {
+pub fn parse_compat_json(v: &Value) -> Result<CompatSuite, InfraError> {
+  let load = |m: String| InfraError::SuiteLoad(m);
   let obj = v
     .as_object()
-    .context("compat suite must be a JSON object")?;
+    .ok_or_else(|| load("compat suite must be a JSON object".into()))?;
 
   let mut cases = Vec::with_capacity(obj.len());
   for (name, case_val) in obj {
     let case_obj = case_val
       .as_object()
-      .with_context(|| format!("case {name} must be an object"))?;
+      .ok_or_else(|| load(format!("case {name} must be an object")))?;
     let expr = case_obj
       .get("expr")
-      .with_context(|| format!("case {name} missing expr"))?;
+      .ok_or_else(|| load(format!("case {name} missing expr")))?;
     let expected = case_obj
       .get("expected")
-      .with_context(|| format!("case {name} missing expected"))?;
+      .ok_or_else(|| load(format!("case {name} missing expected")))?;
     cases.push(CompatCase {
       name: name.clone(),
-      expr: field_to_nix(expr)?,
-      expected: field_to_nix(expected)?,
+      expr: field_to_nix(expr),
+      expected: field_to_nix(expected),
     });
   }
   Ok(CompatSuite { cases })
 }
 
-/// Load a compat suite from `.json` or `.nix` (nix-unit / runTests shape).
-pub fn load_compat_suite(path: &Path) -> anyhow::Result<CompatSuite> {
+/// Load a compat suite from `.json` or `.nix` (nix-unit / runTests shape; `.nix` is evaluated
+/// with `eval`, falling back to a `.json` sidecar when that fails).
+pub fn load_compat_suite(eval: Arc<dyn NixEval>, path: &Path) -> Effect<CompatSuite, InfraError> {
+  let path = path.to_path_buf();
   match path.extension().and_then(|e| e.to_str()) {
-    Some("json") => load_json_file(path),
-    Some("nix") => load_nix_compat_suite(path),
-    _ => bail!("unsupported compat suite format: {}", path.display()),
+    Some("json") => suspend(move || from_result(load_json_file(&path))),
+    Some("nix") => load_nix_compat_suite(eval, path),
+    _ => fail(InfraError::SuiteLoad(format!(
+      "unsupported compat suite format: {}",
+      path.display()
+    ))),
   }
 }
 
-fn load_json_file(path: &Path) -> anyhow::Result<CompatSuite> {
-  let data = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-  let v: Value = serde_json::from_str(&data)?;
+fn load_json_file(path: &Path) -> Result<CompatSuite, InfraError> {
+  let at =
+    |e: &dyn std::fmt::Display| InfraError::SuiteLoad(format!("read {}: {e}", path.display()));
+  let data = std::fs::read_to_string(path).map_err(|e| at(&e))?;
+  let v: Value = serde_json::from_str(&data).map_err(|e| at(&e))?;
   parse_compat_json(&v)
 }
 
@@ -78,28 +92,21 @@ fn sidecar_json_path(nix_path: &Path) -> PathBuf {
   nix_path.with_extension("json")
 }
 
-fn load_nix_compat_suite(path: &Path) -> anyhow::Result<CompatSuite> {
-  match try_nix_eval(path) {
-    Ok(suite) => Ok(suite),
-    Err(primary) => {
-      let sidecar = sidecar_json_path(path);
-      if sidecar.is_file() {
-        load_json_file(&sidecar)
-      } else {
-        Err(primary)
-      }
-    }
-  }
-}
-
-fn try_nix_eval(path: &Path) -> anyhow::Result<CompatSuite> {
-  let v = crate::eval::nix_eval_file(path).map_err(|outcome| match outcome {
-    crate::outcome::AssayOutcome::EvalError { message, .. } => {
-      anyhow::anyhow!("nix eval failed: {message}")
-    }
-    other => anyhow::anyhow!("nix eval failed: {other:?}"),
-  })?;
-  parse_compat_json(&v)
+fn load_nix_compat_suite(eval: Arc<dyn NixEval>, path: PathBuf) -> Effect<CompatSuite, InfraError> {
+  eval
+    .eval_file(&path)
+    .map_err(nix_eval_failed)
+    .flat_map(|v| from_result(parse_compat_json(&v)))
+    .catch(move |primary| {
+      suspend(move || {
+        let sidecar = sidecar_json_path(&path);
+        from_result(if sidecar.is_file() {
+          load_json_file(&sidecar)
+        } else {
+          Err(primary)
+        })
+      })
+    })
 }
 
 fn nix_string_literal(s: &str) -> String {
@@ -130,10 +137,10 @@ fn nix_attr_name(s: &str) -> String {
 /// Convert a JSON field to a Nix expression string (strings pass through as source).
 ///
 /// Used for nix-unit compat suites where `expr` / `expected` strings are Nix source.
-pub fn field_to_nix(v: &Value) -> anyhow::Result<String> {
+pub fn field_to_nix(v: &Value) -> String {
   match v {
-    Value::String(s) => Ok(s.clone()),
-    other => Ok(value_to_nix_expr(other)),
+    Value::String(s) => s.clone(),
+    other => value_to_nix_expr(other),
   }
 }
 
@@ -169,6 +176,17 @@ fn value_to_nix_expr(v: &Value) -> String {
 mod tests {
   use super::*;
   use serde_json::json;
+
+  /// Loads `path` with a fake evaluator whose `.nix` evaluation always fails.
+  fn load(path: &Path) -> Result<CompatSuite, InfraError> {
+    let eval: Arc<dyn NixEval> = Arc::new(crate::fake::MockNixEval::default());
+    id_effect::run_test(load_compat_suite(eval, path))
+      .into_result()
+      .map_err(|c| match c {
+        id_effect::Cause::Fail(e) => e,
+        other => InfraError::Worker(format!("{other:?}")),
+      })
+  }
 
   #[test]
   fn parse_compat_json_five_cases() {
@@ -212,7 +230,7 @@ mod tests {
   #[test]
   fn load_compat_suite_from_fixture_json() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/compat/suite.json");
-    let suite = load_compat_suite(&path).expect("load suite.json");
+    let suite = load(&path).expect("load suite.json");
     assert!(suite.cases.len() >= 5);
   }
   #[test]
@@ -229,7 +247,7 @@ mod tests {
   fn load_compat_unsupported_extension() {
     let path = std::env::temp_dir().join("assay-bad.ext");
     std::fs::write(&path, "{}").unwrap();
-    assert!(load_compat_suite(&path).is_err());
+    assert!(load(&path).is_err());
     let _ = std::fs::remove_file(path);
   }
 
@@ -271,8 +289,8 @@ mod tests {
 
   #[test]
   fn field_to_nix_accepts_json_literals() {
-    assert_eq!(field_to_nix(&json!("expr")).unwrap(), "expr");
-    assert_eq!(field_to_nix(&json!(42)).unwrap(), "42");
+    assert_eq!(field_to_nix(&json!("expr")), "expr");
+    assert_eq!(field_to_nix(&json!(42)), "42");
   }
 
   #[test]
@@ -288,7 +306,7 @@ mod tests {
     std::fs::create_dir_all(&dir).unwrap();
     let nix_path = dir.join("suite.nix");
     std::fs::write(&nix_path, "invalid nix {{{").unwrap();
-    assert!(load_compat_suite(&nix_path).is_err());
+    assert!(load(&nix_path).is_err());
     let _ = std::fs::remove_dir_all(dir);
   }
 
@@ -307,7 +325,7 @@ mod tests {
     let json_path = dir.join("suite.json");
     std::fs::write(&nix_path, "invalid nix {{{").unwrap();
     std::fs::write(&json_path, r#"{"sidecar": {"expr": "1", "expected": "1"}}"#).unwrap();
-    let suite = load_compat_suite(&nix_path).expect("sidecar fallback");
+    let suite = load(&nix_path).expect("sidecar fallback");
     assert_eq!(suite.cases.len(), 1);
     assert_eq!(suite.cases[0].name, "sidecar");
     let _ = std::fs::remove_dir_all(dir);

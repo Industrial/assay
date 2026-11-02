@@ -1,24 +1,23 @@
 //! Targeted tests for branch coverage gaps across the assay lib.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use id_effect::{Cap, Exit, FromEnv, build_env};
+use id_effect::{Exit, expect_exit_failure, expect_exit_success, run_test};
 use serde_json::{Value, json};
 
 use crate::assay_suite::parse_assay_suite;
-use crate::caps::{AssayEnv, MockNixEval, NixEvaluatorKey, NixWorkerPoolKey, mock_providers};
 use crate::claims::Claim;
 use crate::discover::{SuiteKind, discover_suites, suite_kind};
-use crate::eval::{EvalBackend, EvalResult, ProcessNixEval, classify_stderr};
+use crate::eval::{EvalResult, NixEval, classify_stderr};
+use crate::fake::{MockNixEval, SyncEval, fake_layer};
 use crate::laws::{law_merge_associativity, run_law_by_name};
+use crate::live::LiveNixEval;
 use crate::outcome::AssayOutcome;
-use crate::pool::MockWorkerPool;
 use crate::prop::{Gen, run_prop_by_name};
-use crate::run::{RunOptions, run_suite_blocking, summarize, summarize_exits};
+use crate::run::{RunOptions, run_suite, summarize, summarize_exits};
 use crate::schema::{decode_claim_json, encode_claim_json};
 use crate::verdict::{CaseVerdict, InfraError, exit_to_outcome, outcome_to_exit};
-use nixq::{fold_object_keys, structural_diff, value_has_attrs_via_traversal};
+use nixq::{fold_object_keys, structural_diff};
 
 #[test]
 fn verdict_unknown_eval_kind_maps_to_eval_throw() {
@@ -69,9 +68,7 @@ fn laws_associativity_exercises_object_wrap_branch() {
 }
 
 #[test]
-fn optics_scalar_has_attrs_via_traversal() {
-  let scalar = json!(42);
-  assert!(!value_has_attrs_via_traversal(&scalar, &["a".into()]));
+fn fold_object_keys_on_null_is_noop() {
   let mut keys = Vec::new();
   fold_object_keys(&json!(null), |k| keys.push(k.to_string()));
   assert!(keys.is_empty());
@@ -177,11 +174,7 @@ fn run_suite_blocking_update_snapshots_and_summarize() {
   std::fs::create_dir_all(&dir).unwrap();
   let path = dir.join("suite.json");
   std::fs::write(&path, r#"{"ok":{"expr":"1","expected":"1"}}"#).unwrap();
-  let mut built = build_env(mock_providers()).expect("env");
-  built.insert::<Cap<NixEvaluatorKey>>(Arc::new(MockNixEval::default()) as _);
-  built.insert::<Cap<NixWorkerPoolKey>>(Arc::new(MockWorkerPool::new(2)) as _);
-  let env = AssayEnv::from_env(built);
-  let report = run_suite_blocking(
+  let run = run_suite(
     &path,
     &RunOptions {
       update_snapshots: true,
@@ -189,9 +182,9 @@ fn run_suite_blocking_update_snapshots_and_summarize() {
       case_timeout_ms: None,
       ..RunOptions::default()
     },
-    env,
   )
-  .expect("run");
+  .provide_layer(fake_layer::<InfraError>(MockNixEval::default()));
+  let report = expect_exit_success(run_test(run));
   assert_eq!(report.outcomes.len(), 1);
   let summary = summarize(&report);
   assert_eq!(summary.total, 1);
@@ -250,25 +243,21 @@ fn eval_live_when_nix_available() {
   {
     return;
   }
-  let backend = ProcessNixEval;
-  assert!(matches!(backend.eval_json("null"), EvalResult::Ok(_)));
-  let thrown = backend.eval_json("builtins.throw \"assay-branch-cov\"");
+  let backend = LiveNixEval;
+  assert!(matches!(
+    backend.eval_expr("null").block_on(),
+    Exit::Success(_)
+  ));
+  let thrown = expect_exit_failure(
+    backend
+      .eval_expr("builtins.throw \"assay-branch-cov\"")
+      .block_on(),
+  );
   assert!(matches!(
       thrown,
-      EvalResult::Err(AssayOutcome::EvalError { ref kind, .. }) if kind == "throw"
+      AssayOutcome::EvalError { ref kind, .. } if kind == "throw"
   ));
   let _ = classify_stderr("error: infinite recursion encountered\n");
-}
-
-#[cfg(feature = "optics")]
-#[test]
-fn optics_traversal_scalar_is_noop() {
-  use nixq::object_keys_traversal;
-  let scalar = json!(42);
-  let keys = object_keys_traversal().to_vec(&scalar);
-  assert!(keys.is_empty());
-  let renamed = object_keys_traversal().over(scalar.clone(), |k| k);
-  assert_eq!(renamed, scalar);
 }
 
 #[test]
@@ -384,14 +373,7 @@ fn schema_decode_suite_cases_prefixes_errors() {
 
 #[test]
 fn force_check_forces_unsupported_backend() {
-  use crate::eval::EvalBackend;
   use crate::force::check_forces;
-  struct Noop;
-  impl EvalBackend for Noop {
-    fn eval_json(&self, _expr: &str) -> crate::eval::EvalResult {
-      crate::eval::EvalResult::Ok(serde_json::json!(null))
-    }
-  }
-  let outcome = check_forces("null", &["x".into()], &Noop);
+  let outcome = check_forces("null", &["x".into()]);
   assert!(matches!(outcome, AssayOutcome::Fail { .. }));
 }

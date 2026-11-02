@@ -1,17 +1,24 @@
-//! Claim algebra interpreter — `Effect` over [`AssayEnv`] returning [`CaseVerdict`].
+//! Claim algebra interpreter — `Effect`s returning [`CaseVerdict`].
+//!
+//! Each claim kind needs only its own capabilities (see [`crate::caps`]): the interpreters take
+//! the capability values they use ([`interpret_with`]); [`interpret_claim`], [`eval_claim`],
+//! [`snapshot_claim`] and [`path_info_claim`] read them from their environments.
+
+use std::sync::Arc;
 
 use serde_json::Value;
 
-use id_effect::{Cause, Effect, Exit};
+use id_effect::{Effect, fail, need, succeed, sync};
+use nixstore::PathInfoStore;
 
 use crate::caps::{
-  AssayEnv, NixEvaluatorKey, NixWorkerPoolKey, PathInfoStoreKey, SnapshotStoreKey,
+  AssayEnv, EvalEnv, NixEvalService, PathInfoEnv, PathInfoService, SnapshotEnv, SnapshotService,
 };
-use crate::eval::{EvalBackend, EvalResult};
+use crate::eval::NixEval;
 use crate::force::check_forces;
 use crate::outcome::AssayOutcome;
 use crate::snapshot::SnapshotStore;
-use crate::verdict::{CaseVerdict, InfraError, outcome_to_exit};
+use crate::verdict::{CaseVerdict, InfraError, outcome_to_effect};
 use nixq::{normalize_value, structural_diff, value_contains_subset, value_has_attrs};
 
 /// A single test claim authored in Nix and interpreted by the runner.
@@ -89,118 +96,182 @@ pub enum Claim {
   },
 }
 
-/// Interpret `claim` using capabilities from [`AssayEnv`].
-pub fn interpret_claim(claim: Claim) -> Effect<CaseVerdict, InfraError, AssayEnv> {
-  Effect::new(move |env| {
-    let pool = id_effect::Needs::<NixWorkerPoolKey>::need(env);
-    let _slot = pool.acquire()?;
-    let eval = id_effect::Needs::<NixEvaluatorKey>::need(env);
-    let store = id_effect::Needs::<SnapshotStoreKey>::need(env);
-    let path_info = id_effect::Needs::<PathInfoStoreKey>::need(env);
-    interpret_claim_with_path_info(eval.as_ref(), store, Some(path_info.as_ref()), &claim)
+/// The capability values a run holds (what [`AssayEnv`] provides); each claim kind uses only
+/// its own part (see [`interpret_with`]).
+#[derive(Clone)]
+pub struct ClaimCaps {
+  pub eval: Arc<dyn NixEval>,
+  pub snapshots: SnapshotStore,
+  pub path_info: Arc<dyn PathInfoStore>,
+}
+
+/// Reads the [`ClaimCaps`] out of [`AssayEnv`] (nothing is opened or spawned here).
+pub fn claim_caps() -> Effect<ClaimCaps, InfraError, AssayEnv> {
+  need::<NixEvalService>().flat_map(|eval: Arc<NixEvalService>| {
+    need::<SnapshotService>().flat_map(move |snapshots: Arc<SnapshotService>| {
+      need::<PathInfoService>().map(move |path_info: Arc<PathInfoService>| ClaimCaps {
+        eval: Arc::clone(&eval.0),
+        snapshots: snapshots.0.clone(),
+        path_info: Arc::clone(&path_info.0),
+      })
+    })
   })
 }
 
-pub(crate) fn interpret_claim_with(
-  eval: &dyn EvalBackend,
-  store: &SnapshotStore,
-  claim: &Claim,
-) -> Result<CaseVerdict, InfraError> {
-  interpret_claim_with_path_info(eval, store, None, claim)
+/// Interpret `claim` using capabilities from [`AssayEnv`].
+pub fn interpret_claim(claim: Claim) -> Effect<CaseVerdict, InfraError, AssayEnv> {
+  claim_caps().flat_map(move |caps| interpret_with(&caps, claim).any_env())
 }
 
-pub(crate) fn interpret_claim_with_path_info(
-  eval: &dyn EvalBackend,
-  store: &SnapshotStore,
-  path_info: Option<&dyn nixstore::PathInfoStore>,
-  claim: &Claim,
-) -> Result<CaseVerdict, InfraError> {
-  let outcome = match claim {
+/// A claim that needs only Nix evaluation (or nothing), in [`EvalEnv`]. A `snapshot` /
+/// `pathInfo` claim needs more: use [`snapshot_claim`] / [`path_info_claim`].
+pub fn eval_claim(claim: Claim) -> Effect<CaseVerdict, InfraError, EvalEnv> {
+  need::<NixEvalService>().flat_map(move |eval: Arc<NixEvalService>| {
+    interpret_outcome(&eval.0, None, None, claim).any_env()
+  })
+}
+
+/// A `snapshot` claim, in [`SnapshotEnv`].
+pub fn snapshot_claim(name: String, expr: String) -> Effect<CaseVerdict, InfraError, SnapshotEnv> {
+  need::<NixEvalService>().flat_map(move |eval: Arc<NixEvalService>| {
+    need::<SnapshotService>().flat_map(move |snapshots: Arc<SnapshotService>| {
+      interpret_snapshot(&eval.0, snapshots.0.clone(), name, &expr)
+        .flat_map(outcome_to_effect)
+        .any_env()
+    })
+  })
+}
+
+/// A `pathInfo` claim, in [`PathInfoEnv`].
+pub fn path_info_claim(
+  path: String,
+  expect: Value,
+  referrers: bool,
+  closure_size: bool,
+) -> Effect<CaseVerdict, InfraError, PathInfoEnv> {
+  need::<PathInfoService>().flat_map(move |store: Arc<PathInfoService>| {
+    interpret_path_info(&store.0, &path, expect, referrers, closure_size)
+      .flat_map(outcome_to_effect)
+      .any_env()
+  })
+}
+
+/// Interpret `claim` with `caps`: evaluating claims use `caps.eval`, `snapshot` also
+/// `caps.snapshots`, `pathInfo` only `caps.path_info`; value claims, laws and props none.
+pub fn interpret_with(caps: &ClaimCaps, claim: Claim) -> Effect<CaseVerdict, InfraError> {
+  interpret_outcome(
+    &caps.eval,
+    Some(&caps.snapshots),
+    Some(&caps.path_info),
+    claim,
+  )
+}
+
+/// Dispatch on the claim kind. A `snapshot` / `pathInfo` claim without its capability is a
+/// runner error.
+fn interpret_outcome(
+  eval: &Arc<dyn NixEval>,
+  snapshots: Option<&SnapshotStore>,
+  path_info: Option<&Arc<dyn PathInfoStore>>,
+  claim: Claim,
+) -> Effect<CaseVerdict, InfraError> {
+  let outcome: Effect<AssayOutcome, InfraError> = match claim {
     Claim::Eq {
       left_expr,
       right_expr,
-    } => interpret_eq(left_expr, right_expr, eval),
-    Claim::EqValues { left, right } => interpret_eq_values(left, right),
-    Claim::Throws { expr, pattern } => interpret_throws(expr, pattern.as_deref(), eval),
+    } => interpret_eq(eval, &left_expr, &right_expr),
+    Claim::EqValues { left, right } => pure(move || interpret_eq_values(&left, &right)),
+    Claim::Throws { expr, pattern } => interpret_throws(eval, &expr, pattern),
     Claim::Subset {
       expr,
       expected_subset,
-    } => interpret_subset(expr, expected_subset, eval),
+    } => eval_then(eval, &expr, move |actual| {
+      interpret_subset_values(&actual, &expected_subset)
+    }),
     Claim::SubsetValues {
       actual,
       expected_subset,
-    } => interpret_subset_values(actual, expected_subset),
-    Claim::HasAttrs { expr, attrs } => interpret_has_attrs(expr, attrs, eval),
-    Claim::HasAttrsValues { actual, attrs } => interpret_has_attrs_values(actual, attrs),
+    } => pure(move || interpret_subset_values(&actual, &expected_subset)),
+    Claim::HasAttrs { expr, attrs } => eval_then(eval, &expr, move |value| {
+      interpret_has_attrs_values(&value, &attrs)
+    }),
+    Claim::HasAttrsValues { actual, attrs } => {
+      pure(move || interpret_has_attrs_values(&actual, &attrs))
+    }
     Claim::Drv {
       expr,
       project,
       expected,
-    } => interpret_drv(expr, project, expected, eval),
+    } => eval_then(eval, &expr, move |v| {
+      interpret_drv_values(&v, &project, &expected)
+    }),
     Claim::DrvValues {
       actual,
       project,
       expected,
-    } => interpret_drv_values(actual, project, expected),
-    Claim::Snapshot { name, expr } => interpret_snapshot(name, expr, eval, store),
-    Claim::Forces { expr, paths } => check_forces(expr, paths, eval),
+    } => pure(move || interpret_drv_values(&actual, &project, &expected)),
+    Claim::Snapshot { name, expr } => match snapshots {
+      Some(store) => interpret_snapshot(eval, store.clone(), name, &expr),
+      None => fail(missing_capability("snapshot", "SnapshotService")),
+    },
+    Claim::Forces { expr, paths } => pure(move || check_forces(&expr, &paths)),
     Claim::Module {
       imports_expr,
       args_expr,
       expect,
-    } => interpret_module(imports_expr, args_expr, expect, eval),
-    Claim::Law { name, seed } => crate::laws::run_law_by_name(name, *seed),
+    } => interpret_module(eval, &imports_expr, &args_expr, expect),
+    Claim::Law { name, seed } => pure(move || crate::laws::run_law_by_name(&name, seed)),
     Claim::Prop { name, seed, trials } => {
-      crate::prop::run_prop_by_name(name, *seed, trials.unwrap_or(128))
+      pure(move || crate::prop::run_prop_by_name(&name, seed, trials.unwrap_or(128)))
     }
     Claim::PathInfo {
       path,
       expect,
       referrers,
       closure_size,
-    } => {
-      let default = nixstore::SqlitePathInfoStore::from_default();
-      let pi = path_info.unwrap_or(&default);
-      interpret_path_info(path, expect, *referrers, *closure_size, pi)
-    }
+    } => match path_info {
+      Some(store) => interpret_path_info(store, &path, expect, referrers, closure_size),
+      None => fail(missing_capability("pathInfo", "PathInfoService")),
+    },
   };
-  outcome_to_result(outcome)
+  outcome.flat_map(outcome_to_effect)
 }
 
-fn outcome_to_result(outcome: AssayOutcome) -> Result<CaseVerdict, InfraError> {
-  match outcome_to_exit(outcome) {
-    Exit::Success(verdict) => Ok(verdict),
-    Exit::Failure(cause) => Err(cause_to_infra(cause)),
-  }
+fn missing_capability(claim: &str, service: &str) -> InfraError {
+  InfraError::Worker(format!("{claim} claim interpreted without {service}"))
 }
 
-fn cause_to_infra(cause: Cause<InfraError>) -> InfraError {
-  match cause {
-    Cause::Fail(err) => err,
-    Cause::Die(msg) => InfraError::Worker(msg),
-    Cause::Interrupt(id) => InfraError::Worker(format!("interrupted fiber {id:?}")),
-    Cause::Both(left, _) => cause_to_infra(*left),
-    Cause::Then(_, right) => cause_to_infra(*right),
-  }
+/// A pure interpretation, run when the effect runs.
+fn pure(f: impl FnOnce() -> AssayOutcome + Send + 'static) -> Effect<AssayOutcome, InfraError> {
+  sync(f)
 }
 
-fn interpret_eq(left_expr: &str, right_expr: &str, eval: &dyn EvalBackend) -> AssayOutcome {
+/// Evaluate `expr` and judge the value with `judge`; a failed evaluation is the outcome.
+fn eval_then(
+  eval: &Arc<dyn NixEval>,
+  expr: &str,
+  judge: impl FnOnce(Value) -> AssayOutcome + Send + 'static,
+) -> Effect<AssayOutcome, InfraError> {
+  eval.eval_expr(expr).map(judge).catch(succeed)
+}
+
+fn interpret_eq(
+  eval: &Arc<dyn NixEval>,
+  left_expr: &str,
+  right_expr: &str,
+) -> Effect<AssayOutcome, InfraError> {
   // One nix process for both sides — process spawn dominates tiny exprs.
   let pair_expr = format!("[({left_expr}) ({right_expr})]");
-  let (left, right) = match eval.eval_json(&pair_expr) {
-    EvalResult::Ok(Value::Array(arr)) if arr.len() == 2 => {
-      (normalize_value(&arr[0]), normalize_value(&arr[1]))
+  eval_then(eval, &pair_expr, |pair| match pair {
+    Value::Array(arr) if arr.len() == 2 => {
+      compare_eq(normalize_value(&arr[0]), normalize_value(&arr[1]))
     }
-    EvalResult::Ok(other) => {
-      return AssayOutcome::EvalError {
-        kind: "eq_pair".into(),
-        message: format!("eq pair eval expected 2-element list, got {other}"),
-        span: None,
-      };
-    }
-    EvalResult::Err(out) => return out,
-  };
-  compare_eq(left, right)
+    other => AssayOutcome::EvalError {
+      kind: "eq_pair".into(),
+      message: format!("eq pair eval expected 2-element list, got {other}"),
+      span: None,
+    },
+  })
 }
 
 fn interpret_eq_values(left: &Value, right: &Value) -> AssayOutcome {
@@ -220,33 +291,38 @@ fn compare_eq(left: Value, right: Value) -> AssayOutcome {
   }
 }
 
-fn interpret_throws(expr: &str, pattern: Option<&str>, eval: &dyn EvalBackend) -> AssayOutcome {
-  match eval.eval_json(expr) {
-    EvalResult::Ok(value) => AssayOutcome::Fail {
+fn interpret_throws(
+  eval: &Arc<dyn NixEval>,
+  expr: &str,
+  pattern: Option<String>,
+) -> Effect<AssayOutcome, InfraError> {
+  eval
+    .eval_expr(expr)
+    .map(|value| AssayOutcome::Fail {
       claim: "throws".into(),
       left: Some(value),
       right: None,
       diff: "expression evaluated successfully; expected throw".into(),
-    },
-    EvalResult::Err(out) => {
-      if !is_throw_outcome(&out) {
-        return out;
-      }
-      if let Some(pat) = pattern {
-        let message = throw_message(&out);
-        if message.contains(pat) {
-          AssayOutcome::Pass
-        } else {
-          AssayOutcome::Fail {
-            claim: "throws".into(),
-            left: None,
-            right: None,
-            diff: format!("throw message {message:?} does not contain pattern {pat:?}"),
-          }
-        }
-      } else {
-        AssayOutcome::Pass
-      }
+    })
+    .catch(move |out| succeed(judge_throw(out, pattern.as_deref())))
+}
+
+fn judge_throw(out: AssayOutcome, pattern: Option<&str>) -> AssayOutcome {
+  if !is_throw_outcome(&out) {
+    return out;
+  }
+  let Some(pat) = pattern else {
+    return AssayOutcome::Pass;
+  };
+  let message = throw_message(&out);
+  if message.contains(pat) {
+    AssayOutcome::Pass
+  } else {
+    AssayOutcome::Fail {
+      claim: "throws".into(),
+      left: None,
+      right: None,
+      diff: format!("throw message {message:?} does not contain pattern {pat:?}"),
     }
   }
 }
@@ -258,34 +334,24 @@ pub fn build_module_eval_expr(imports_expr: &str, args_expr: &str) -> String {
 }
 
 fn interpret_module(
+  eval: &Arc<dyn NixEval>,
   imports_expr: &str,
   args_expr: &str,
-  expect: &Value,
-  eval: &dyn EvalBackend,
-) -> AssayOutcome {
+  expect: Value,
+) -> Effect<AssayOutcome, InfraError> {
   let expr = build_module_eval_expr(imports_expr, args_expr);
-  let actual = match eval.eval_json(&expr) {
-    EvalResult::Ok(v) => v,
-    EvalResult::Err(out) => return out,
-  };
-  if value_contains_subset(&actual, expect) {
-    AssayOutcome::Pass
-  } else {
-    AssayOutcome::Fail {
-      claim: "module".into(),
-      left: Some(actual.clone()),
-      right: Some(expect.clone()),
-      diff: structural_diff(&actual, expect),
+  eval_then(eval, &expr, move |actual| {
+    if value_contains_subset(&actual, &expect) {
+      AssayOutcome::Pass
+    } else {
+      AssayOutcome::Fail {
+        claim: "module".into(),
+        left: Some(actual.clone()),
+        right: Some(expect.clone()),
+        diff: structural_diff(&actual, &expect),
+      }
     }
-  }
-}
-
-fn interpret_subset(expr: &str, expected_subset: &Value, eval: &dyn EvalBackend) -> AssayOutcome {
-  let actual = match eval.eval_json(expr) {
-    EvalResult::Ok(v) => v,
-    EvalResult::Err(out) => return out,
-  };
-  interpret_subset_values(&actual, expected_subset)
+  })
 }
 
 fn interpret_subset_values(actual: &Value, expected_subset: &Value) -> AssayOutcome {
@@ -301,14 +367,6 @@ fn interpret_subset_values(actual: &Value, expected_subset: &Value) -> AssayOutc
   }
 }
 
-fn interpret_has_attrs(expr: &str, attrs: &[String], eval: &dyn EvalBackend) -> AssayOutcome {
-  let value = match eval.eval_json(expr) {
-    EvalResult::Ok(v) => v,
-    EvalResult::Err(out) => return out,
-  };
-  interpret_has_attrs_values(&value, attrs)
-}
-
 fn interpret_has_attrs_values(value: &Value, attrs: &[String]) -> AssayOutcome {
   if value_has_attrs(value, attrs) {
     AssayOutcome::Pass
@@ -319,18 +377,6 @@ fn interpret_has_attrs_values(value: &Value, attrs: &[String]) -> AssayOutcome {
       right: None,
       diff: format!("missing attrs among {:?}", attrs),
     }
-  }
-}
-
-fn interpret_drv(
-  expr: &str,
-  project_fields: &[String],
-  expected: &Value,
-  eval: &dyn EvalBackend,
-) -> AssayOutcome {
-  match eval.eval_json(expr) {
-    EvalResult::Ok(v) => interpret_drv_values(&v, project_fields, expected),
-    EvalResult::Err(out) => out,
   }
 }
 
@@ -365,50 +411,50 @@ fn interpret_drv_values(
 }
 
 fn interpret_path_info(
+  store: &Arc<dyn PathInfoStore>,
   path: &str,
-  expect: &Value,
+  expect: Value,
   referrers: bool,
   closure_size: bool,
-  store: &dyn nixstore::PathInfoStore,
-) -> AssayOutcome {
+) -> Effect<AssayOutcome, InfraError> {
   let opts = nixstore::QueryOpts {
     include_referrers: referrers,
     include_closure_size: closure_size,
   };
-  match store.query(path, opts) {
-    Ok(info) => {
+  store
+    .query(path, opts)
+    .map(move |info| {
       let actual = info.to_json_value();
-      if value_contains_subset(&actual, expect) {
+      if value_contains_subset(&actual, &expect) {
         AssayOutcome::Pass
       } else {
-        let diff = structural_diff(&actual, expect);
+        let diff = structural_diff(&actual, &expect);
         AssayOutcome::Fail {
           claim: "pathInfo".into(),
           left: Some(actual),
-          right: Some(expect.clone()),
+          right: Some(expect),
           diff,
         }
       }
-    }
-    Err(e) => AssayOutcome::EvalError {
-      kind: "pathInfo".into(),
-      message: e.to_string(),
-      span: None,
-    },
-  }
+    })
+    .catch(|e| {
+      succeed(AssayOutcome::EvalError {
+        kind: "pathInfo".into(),
+        message: e.to_string(),
+        span: None,
+      })
+    })
 }
 
 fn interpret_snapshot(
-  name: &str,
+  eval: &Arc<dyn NixEval>,
+  store: SnapshotStore,
+  name: String,
   expr: &str,
-  eval: &dyn EvalBackend,
-  store: &SnapshotStore,
-) -> AssayOutcome {
-  let actual = match eval.eval_json(expr) {
-    EvalResult::Ok(v) => normalize_value(&v),
-    EvalResult::Err(out) => return out,
-  };
-  store.assert_match(name, &actual, store.update_snapshots)
+) -> Effect<AssayOutcome, InfraError> {
+  eval_then(eval, expr, move |v| {
+    store.assert_match(&name, &normalize_value(&v), store.update_snapshots)
+  })
 }
 
 fn is_throw_outcome(out: &AssayOutcome) -> bool {
@@ -430,10 +476,11 @@ fn throw_message(out: &AssayOutcome) -> String {
 mod tests {
   use std::sync::Arc;
 
-  use id_effect::{Cap, Exit, FromEnv, build_env, run_test};
+  use id_effect::{Exit, Layer, hlist, run_test};
 
   use super::*;
-  use crate::caps::{AssayEnv, MockNixEval, NixEvaluatorKey, PathInfoStoreKey, mock_providers};
+  use crate::eval::EvalResult;
+  use crate::fake::{MockNixEval, fake_layer};
 
   use crate::verdict::CaseVerdict;
 
@@ -441,11 +488,9 @@ mod tests {
   where
     F: FnOnce(&MockNixEval),
   {
-    let mock = Arc::new(MockNixEval::default());
+    let mock = MockNixEval::default();
     setup(&mock);
-    let mut built = build_env(mock_providers()).expect("env");
-    built.insert::<Cap<NixEvaluatorKey>>(mock);
-    run_test(interpret_claim(claim), AssayEnv::from_env(built))
+    run_test(interpret_claim(claim).provide_layer(fake_layer(mock)))
   }
 
   #[test]
@@ -923,32 +968,55 @@ mod tests {
       referrers: None,
       closure_size: None,
     });
-    let mut built = build_env(mock_providers()).expect("env");
-    built.insert::<Cap<NixEvaluatorKey>>(Arc::new(MockNixEval::default()));
-    built.insert::<Cap<PathInfoStoreKey>>(mock.clone() as PathInfoStoreKey);
-    let env = AssayEnv::from_env(built);
-    let pass = run_test(
-      interpret_claim(Claim::PathInfo {
-        path: "/nix/store/x-a".into(),
-        expect: serde_json::json!({"narSize": 42}),
-        referrers: false,
-        closure_size: false,
-      }),
-      env.clone(),
-    );
-    assert!(matches!(pass, Exit::Success(CaseVerdict::Pass)));
-    let fail = run_test(
-      interpret_claim(Claim::PathInfo {
-        path: "/nix/store/x-a".into(),
-        expect: serde_json::json!({"narSize": 99}),
-        referrers: false,
-        closure_size: false,
-      }),
-      env,
-    );
+    let mock: Arc<dyn nixstore::PathInfoStore> = mock;
+    let query = |n: u64| {
+      path_info_claim(
+        "/nix/store/x-a".into(),
+        serde_json::json!({ "narSize": n }),
+        false,
+        false,
+      )
+      .provide_layer(Layer::<PathInfoEnv, InfraError>::succeed(hlist![
+        PathInfoService(Arc::clone(&mock))
+      ]))
+    };
     assert!(matches!(
-      fail,
+      run_test(query(42)),
+      Exit::Success(CaseVerdict::Pass)
+    ));
+    assert!(matches!(
+      run_test(query(99)),
       Exit::Success(CaseVerdict::AssertFail { .. })
+    ));
+  }
+
+  #[test]
+  fn path_info_without_a_store_database_is_a_case_error() {
+    let store: Arc<dyn nixstore::PathInfoStore> = Arc::new(crate::live::LazyPathInfoStore::new(
+      "/nonexistent/assay-store",
+    ));
+    let claim = path_info_claim("/nix/store/x-a".into(), serde_json::json!({}), false, false)
+      .provide_layer(Layer::<PathInfoEnv, InfraError>::succeed(hlist![
+        PathInfoService(store)
+      ]));
+    match run_test(claim) {
+      Exit::Success(CaseVerdict::EvalThrow { kind, .. }) => assert_eq!(kind, "pathInfo"),
+      other => panic!("expected a pathInfo eval error, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn eval_claim_needs_only_nix_eval() {
+    let mock = MockNixEval::default();
+    mock.set("1", EvalResult::Ok(serde_json::json!(1)));
+    let layer = Layer::<EvalEnv, InfraError>::succeed(hlist![NixEvalService(Arc::new(mock))]);
+    let claim = Claim::Eq {
+      left_expr: "1".into(),
+      right_expr: "1".into(),
+    };
+    assert!(matches!(
+      run_test(eval_claim(claim).provide_layer(layer)),
+      Exit::Success(CaseVerdict::Pass)
     ));
   }
 }

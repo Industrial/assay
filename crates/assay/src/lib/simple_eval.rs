@@ -56,15 +56,27 @@ pub fn eval_simple_expr(expr: &str) -> Result<Value, ()> {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SimpleNixEval;
 
+fn unsupported(what: String) -> id_effect::Effect<Value, AssayOutcome> {
+  id_effect::fail(AssayOutcome::EvalError {
+    kind: "unsupported_simple_expr".to_string(),
+    message: format!("expression not supported by simple eval: {what}"),
+    span: None,
+  })
+}
+
 impl crate::eval::NixEval for SimpleNixEval {
-  fn eval_json(&self, expr: &str) -> crate::eval::EvalResult {
+  fn eval_expr(&self, expr: &str) -> id_effect::Effect<Value, AssayOutcome> {
     match eval_simple_expr(expr) {
-      Ok(value) => crate::eval::EvalResult::Ok(value),
-      Err(()) => crate::eval::EvalResult::Err(AssayOutcome::EvalError {
-        kind: "unsupported_simple_expr".to_string(),
-        message: format!("expression not supported by simple eval: {expr}"),
-        span: None,
-      }),
+      Ok(value) => id_effect::succeed(value),
+      Err(()) => unsupported(expr.to_string()),
     }
+  }
+
+  fn eval_file(&self, path: &std::path::Path) -> id_effect::Effect<Value, AssayOutcome> {
+    unsupported(path.display().to_string())
+  }
+
+  fn eval_source(&self, source: &str) -> id_effect::Effect<Value, AssayOutcome> {
+    self.eval_expr(source)
   }
 }

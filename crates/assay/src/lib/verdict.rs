@@ -3,10 +3,14 @@
 //! Soft assertion results live in [`CaseVerdict`] as `Exit::Success` payloads.
 //! Infrastructure failures are [`InfraError`] wrapped in `Cause::Fail`.
 //! Panics and resource leaks map to `Cause::Die`.
+//!
+//! [`exit_to_outcome`] is the one fold from a case's `Exit` (and its `Cause`) to what is
+//! reported; [`case_exit_byte`] is the matching exit-code fold.
 
-use id_effect::{Cause, Exit};
+use id_effect::{Cause, Effect, Exit, die, fail, succeed};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 
 use crate::outcome::AssayOutcome;
 
@@ -39,15 +43,55 @@ pub enum CaseVerdict {
   },
 }
 
-/// Infrastructure / runner failure (typed error in `Cause::Fail`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Infrastructure / runner failure (typed error in `Cause::Fail`), one variant per caller
+/// response: a suite that cannot be loaded aborts the run; the others become a case's error
+/// verdict.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum InfraError {
+  /// A suite file could not be read, evaluated or decoded.
+  #[error("cannot load suite: {0}")]
   SuiteLoad(String),
+  /// A required tool is missing (e.g. `nix` not on PATH).
+  #[error("{0} (install nix or put it on PATH)")]
   Capability(String),
+  /// A case ran longer than `--case-timeout-ms`.
+  #[error("case {case:?} timed out after {limit_ms} ms (raise --case-timeout-ms)")]
   Timeout { case: String, limit_ms: u64 },
+  /// The runner itself failed (e.g. a malformed batch result).
+  #[error("runner error: {0}")]
   Worker(String),
+  /// I/O while running a case (spawning nix, unreadable output, files).
+  #[error("io error: {0}")]
   Io(String),
+}
+
+impl InfraError {
+  /// Whether `--retry-flaky-eval` retries this failure: only I/O hiccups (spawning nix,
+  /// truncated output); a missing nix, a timeout or a runner error never heals by retrying.
+  pub fn is_transient(&self) -> bool {
+    matches!(self, Self::Io(_))
+  }
+}
+
+/// [`outcome_to_exit`] as an effect: verdicts succeed, infra errors fail, defects die.
+pub fn outcome_to_effect(outcome: AssayOutcome) -> Effect<CaseVerdict, InfraError> {
+  match outcome_to_exit(outcome) {
+    Exit::Success(verdict) => succeed(verdict),
+    Exit::Failure(Cause::Fail(e)) => fail(e),
+    Exit::Failure(Cause::Die(defect)) => die(defect),
+    Exit::Failure(cause) => die(format!("{cause:?}")),
+  }
+}
+
+/// The exit-code byte of one case: `0` pass, `1` any other verdict or typed failure, `101` a
+/// defect, `130` an interrupt (worst wins inside a composite cause).
+pub fn case_exit_byte(exit: &Exit<CaseVerdict, InfraError>) -> u8 {
+  match exit {
+    Exit::Success(CaseVerdict::Pass) => 0,
+    Exit::Success(_) => 1,
+    Exit::Failure(cause) => id_effect_cli::cause_max_exit_byte(cause),
+  }
 }
 
 /// Map legacy [`AssayOutcome`] to `Exit<CaseVerdict, InfraError>`.
@@ -157,13 +201,13 @@ fn infra_cause_to_outcome(cause: &Cause<InfraError>) -> AssayOutcome {
       message: msg.clone(),
       span: None,
     },
-    Cause::Die(message) => {
-      if message == "resource leak" {
+    Cause::Die(defect) => {
+      if defect.message() == "resource leak" {
         AssayOutcome::ResourceLeak
       } else {
         AssayOutcome::EvalError {
           kind: "panic".into(),
-          message: message.clone(),
+          message: defect.message().to_string(),
           span: None,
         }
       }

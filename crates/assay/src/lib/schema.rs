@@ -313,9 +313,9 @@ fn source_field(obj: &BTreeMap<String, Unknown>, key: &str) -> Result<String, Pa
   source_field_from_unknown(value, key)
 }
 
-fn source_field_from_unknown(value: &Unknown, key: &str) -> Result<String, ParseError> {
+fn source_field_from_unknown(value: &Unknown, _key: &str) -> Result<String, ParseError> {
   let json = unknown_to_json(value);
-  field_to_nix(&json).map_err(|err| ParseError::new(key, err.to_string()))
+  Ok(field_to_nix(&json))
 }
 
 fn json_field(obj: &BTreeMap<String, Unknown>, key: &str) -> Result<Value, ParseError> {

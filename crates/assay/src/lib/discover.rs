@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
+use crate::verdict::InfraError;
 
 /// A discovered suite file and its kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,7 +20,7 @@ pub enum SuiteKind {
 }
 
 /// Walk `root` recursively and collect known suite file patterns.
-pub fn discover_suites(root: &Path) -> anyhow::Result<Vec<SuiteFile>> {
+pub fn discover_suites(root: &Path) -> Result<Vec<SuiteFile>, InfraError> {
   let mut suites = Vec::new();
   if root.is_file() {
     if let Some(kind) = suite_kind(root) {
@@ -57,9 +57,10 @@ pub fn suite_kind(path: &Path) -> Option<SuiteKind> {
   None
 }
 
-fn walk_dir(dir: &Path, suites: &mut Vec<SuiteFile>) -> anyhow::Result<()> {
-  for entry in std::fs::read_dir(dir).with_context(|| format!("read dir {}", dir.display()))? {
-    let entry = entry?;
+fn walk_dir(dir: &Path, suites: &mut Vec<SuiteFile>) -> Result<(), InfraError> {
+  let read_err = |e: std::io::Error| InfraError::Io(format!("read dir {}: {e}", dir.display()));
+  for entry in std::fs::read_dir(dir).map_err(read_err)? {
+    let entry = entry.map_err(read_err)?;
     let path = entry.path();
     if path.is_dir() {
       let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
