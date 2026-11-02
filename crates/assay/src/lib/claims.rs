@@ -865,6 +865,69 @@ mod tests {
     assert!(matches!(prop, Exit::Success(CaseVerdict::Pass)));
   }
 
+  /// `law` / `prop` claims decoded from arbitrary suite wires (`from_schema` over the claim
+  /// schema) and interpreted as effects (`prop_check`): every built-in passes for any seed.
+  mod property {
+    use id_effect::HasSchema;
+    use id_effect::schema::Unknown;
+    use id_effect::testing::property::{from_schema, prop_check, unknown_object};
+    use proptest::prelude::*;
+    use proptest::sample::select;
+    use proptest::test_runner::TestCaseError;
+
+    use super::*;
+    use crate::laws::BUILTIN_LAW_NAMES;
+    use crate::prop::BUILTIN_PROP_NAMES;
+
+    fn tag(kind: &'static str) -> BoxedStrategy<Unknown> {
+      Just(Unknown::String(kind.into())).boxed()
+    }
+
+    fn name(names: &'static [&'static str]) -> BoxedStrategy<Unknown> {
+      select(names)
+        .prop_map(|n| Unknown::String(n.into()))
+        .boxed()
+    }
+
+    fn seed() -> BoxedStrategy<Unknown> {
+      (0..=i64::MAX).prop_map(Unknown::I64).boxed()
+    }
+
+    fn law_or_prop_wire() -> impl Strategy<Value = Unknown> {
+      prop_oneof![
+        unknown_object([
+          ("claim", tag("law")),
+          ("name", name(BUILTIN_LAW_NAMES)),
+          ("seed", seed())
+        ]),
+        unknown_object([
+          ("claim", tag("prop")),
+          ("name", name(BUILTIN_PROP_NAMES)),
+          ("seed", seed()),
+          ("trials", (0..64i64).prop_map(Unknown::I64).boxed())
+        ]),
+      ]
+    }
+
+    proptest! {
+      #![proptest_config(ProptestConfig::with_cases(64))]
+
+      #[test]
+      fn builtin_law_and_prop_claims_pass_for_any_seed(
+        claim in from_schema(Claim::schema(), law_or_prop_wire())
+      ) {
+        let is_law_or_prop = matches!(claim, Claim::Law { .. } | Claim::Prop { .. });
+        prop_assert!(is_law_or_prop, "decoded {:?}", claim);
+        let verdict = prop_check(
+          interpret_claim(claim)
+            .provide_layer(fake_layer(MockNixEval::default()))
+            .map_err(|e| TestCaseError::fail(format!("{e:?}"))),
+        )?;
+        prop_assert_eq!(verdict, CaseVerdict::Pass);
+      }
+    }
+  }
+
   #[test]
   fn interpret_eq_bad_pair_length_returns_eq_pair_error() {
     let exit = run_claim_test(

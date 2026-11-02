@@ -248,16 +248,65 @@ mod tests {
   }
 }
 
-#[cfg(feature = "proptest")]
-mod proptest_laws {
-  #[allow(unused_imports)] // used inside proptest! expansions
-  use super::*;
+/// The laws as properties over arbitrary JSON objects (`id_effect::testing::property`), and the
+/// seeded law runner over arbitrary seeds.
+#[cfg(test)]
+mod property {
+  use id_effect::schema::serde_json_from_unknown;
+  use id_effect::testing::property::arb_unknown;
+  use proptest::collection::btree_map;
   use proptest::prelude::*;
 
+  use super::*;
+
+  /// Objects with colliding short keys and arbitrary JSON values.
+  fn arb_object() -> impl Strategy<Value = Map<String, Value>> {
+    btree_map("[a-c]{1,2}", arb_unknown(), 0..5).prop_map(|fields| {
+      fields
+        .into_iter()
+        .map(|(key, value)| (key, serde_json_from_unknown(&value)))
+        .collect()
+    })
+  }
+
   proptest! {
-      #[test]
-      fn merge_idempotent_holds_for_any_seed(seed in 0u64..512) {
-          prop_assert_eq!(law_merge_idempotent(seed), AssayOutcome::Pass);
+    #[test]
+    fn merge_identity_holds_for_any_object(a in arb_object()) {
+      prop_assert_eq!(merge_maps(&a, &Map::new()), a.clone());
+      prop_assert_eq!(merge_maps(&Map::new(), &a), a);
+    }
+
+    #[test]
+    fn merge_associativity_holds_for_any_objects(
+      a in arb_object(),
+      b in arb_object(),
+      c in arb_object(),
+    ) {
+      prop_assert_eq!(
+        merge_maps(&merge_maps(&a, &b), &c),
+        merge_maps(&a, &merge_maps(&b, &c))
+      );
+    }
+
+    #[test]
+    fn merge_idempotent_holds_for_any_object(a in arb_object()) {
+      prop_assert_eq!(merge_maps(&a, &a), a);
+    }
+
+    #[test]
+    fn merge_is_last_wins_for_any_objects(a in arb_object(), b in arb_object()) {
+      let merged = merge_maps(&a, &b);
+      for (key, value) in &merged {
+        prop_assert_eq!(Some(value), b.get(key).or_else(|| a.get(key)));
       }
+      prop_assert!(a.keys().chain(b.keys()).all(|key| merged.contains_key(key)));
+    }
+
+    #[test]
+    fn every_builtin_law_passes_for_any_seed(seed in any::<u64>()) {
+      for name in BUILTIN_LAW_NAMES {
+        prop_assert_eq!(run_law_by_name(name, seed), AssayOutcome::Pass, "law {}", name);
+      }
+    }
   }
 }

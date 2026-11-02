@@ -30,10 +30,11 @@ pub mod snapshot;
 pub mod verdict;
 
 pub use caps::{
-  AssayEnv, EvalEnv, FakeStore, FsEnv, FsService, NixEvalService, PathInfoEnv, PathInfoService,
-  SnapshotEnv, SnapshotService, SuiteEnv, default_snapshot_root, fs_layer, layer, layer_from,
-  require_store, store_root_from,
+  AssayEnv, EvalEnv, FsEnv, FsService, NixEvalService, PathInfoEnv, PathInfoService, SnapshotEnv,
+  SnapshotService, SuiteEnv, default_snapshot_root, fs_layer, layer, layer_from, store_root_from,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use caps::{FakeStore, require_store};
 pub use claims::{
   Claim, ClaimCaps, build_module_eval_expr, claim_caps, eval_claim, interpret_claim,
   interpret_with, path_info_claim, snapshot_claim,

@@ -1006,6 +1006,166 @@ mod tests {
     );
   }
 
+  /// Wire-level generators for every claim shape, and the codec round trip over them.
+  mod property {
+    use id_effect::testing::property::{
+      arb_unknown, from_schema, prop_assert_roundtrip, unknown_object,
+    };
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+    use proptest::strategy::Union;
+    use proptest::test_runner::TestCaseError;
+
+    use super::*;
+
+    type Field = (&'static str, BoxedStrategy<Unknown>);
+
+    fn tag(kind: &'static str) -> Field {
+      ("claim", Just(Unknown::String(kind.into())).boxed())
+    }
+
+    fn text() -> BoxedStrategy<Unknown> {
+      "[ -~]{0,12}".prop_map(Unknown::String).boxed()
+    }
+
+    /// Nix source: a string, or any JSON (rendered as a Nix literal on decode).
+    fn source() -> BoxedStrategy<Unknown> {
+      prop_oneof![text(), arb_unknown()].boxed()
+    }
+
+    fn value() -> BoxedStrategy<Unknown> {
+      arb_unknown().boxed()
+    }
+
+    fn names() -> BoxedStrategy<Unknown> {
+      vec("[a-z.]{1,6}", 0..4)
+        .prop_map(|v| Unknown::Array(v.into_iter().map(Unknown::String).collect()))
+        .boxed()
+    }
+
+    fn natural(max: i64) -> BoxedStrategy<Unknown> {
+      (0..=max).prop_map(Unknown::I64).boxed()
+    }
+
+    fn flag() -> BoxedStrategy<Unknown> {
+      any::<bool>().prop_map(Unknown::Bool).boxed()
+    }
+
+    fn object(fields: Vec<Field>) -> BoxedStrategy<Unknown> {
+      unknown_object(fields).boxed()
+    }
+
+    /// One wire per claim shape (both modes of the value-mode kinds, optional fields set and
+    /// unset, both `closureSize` spellings).
+    fn arb_claim_wire() -> impl Strategy<Value = Unknown> {
+      Union::new(vec![
+        object(vec![tag("eq"), ("expr", source()), ("expected", source())]),
+        object(vec![tag("eq"), ("actual", value()), ("expected", value())]),
+        object(vec![tag("throws"), ("expr", source())]),
+        object(vec![tag("throws"), ("expr", source()), ("pattern", text())]),
+        object(vec![
+          tag("subset"),
+          ("expr", source()),
+          ("expected", value()),
+        ]),
+        object(vec![
+          tag("subset"),
+          ("actual", value()),
+          ("expected", value()),
+        ]),
+        object(vec![
+          tag("hasAttrs"),
+          ("expr", source()),
+          ("attrs", names()),
+        ]),
+        object(vec![
+          tag("hasAttrs"),
+          ("actual", value()),
+          ("attrs", names()),
+        ]),
+        object(vec![
+          tag("drv"),
+          ("expr", source()),
+          ("project", names()),
+          ("expected", value()),
+        ]),
+        object(vec![
+          tag("drv"),
+          ("actual", value()),
+          ("project", names()),
+          ("expected", value()),
+        ]),
+        object(vec![tag("snapshot"), ("name", text()), ("expr", source())]),
+        object(vec![tag("forces"), ("expr", source()), ("paths", names())]),
+        object(vec![
+          tag("module"),
+          ("imports", source()),
+          ("args", source()),
+          ("expect", value()),
+        ]),
+        object(vec![
+          tag("law"),
+          ("name", text()),
+          ("seed", natural(i64::MAX)),
+        ]),
+        object(vec![
+          tag("prop"),
+          ("name", text()),
+          ("seed", natural(i64::MAX)),
+        ]),
+        object(vec![
+          tag("prop"),
+          ("name", text()),
+          ("seed", natural(i64::MAX)),
+          ("trials", natural(i64::from(u32::MAX))),
+        ]),
+        object(vec![tag("pathInfo"), ("path", text()), ("expect", value())]),
+        object(vec![
+          tag("pathInfo"),
+          ("path", text()),
+          ("expect", value()),
+          ("referrers", flag()),
+          ("closureSize", flag()),
+        ]),
+        object(vec![
+          tag("pathInfo"),
+          ("path", text()),
+          ("expect", value()),
+          ("closure_size", flag()),
+        ]),
+      ])
+    }
+
+    proptest! {
+      #[test]
+      fn every_claim_kind_round_trips(claim in from_schema(Claim::schema(), arb_claim_wire())) {
+        let schema = Claim::schema();
+        prop_assert_roundtrip(&schema, claim.clone())?;
+        // The accumulating decoder (suite loads) agrees with the fail-fast one.
+        let all = schema
+          .decode_unknown_all(&schema.encode(claim.clone()))
+          .map_err(|e| TestCaseError::fail(describe_issues(&e)))?;
+        prop_assert_eq!(all, claim);
+      }
+
+      #[test]
+      fn suites_of_any_claims_decode_every_case(
+        claims in proptest::collection::btree_map(
+          "[a-z]{1,6}",
+          from_schema(Claim::schema(), arb_claim_wire()),
+          0..6,
+        )
+      ) {
+        let suite = serde_json_from_unknown(&Unknown::Object(BTreeMap::from([(
+          "cases".to_owned(),
+          SuiteCases::schema().encode(SuiteCases(claims.clone())),
+        )])));
+        let decoded = decode_suite(&suite).map_err(|e| TestCaseError::fail(describe_issues(&e)))?;
+        prop_assert_eq!(decoded, claims.into_iter().collect::<Vec<_>>());
+      }
+    }
+  }
+
   #[test]
   fn claim_schema_has_schema_trait() {
     let wire = Claim::schema().encode(Claim::Law {

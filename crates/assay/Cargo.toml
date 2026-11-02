@@ -17,7 +17,6 @@ clap = { version = "4.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
-proptest = { version = "1", optional = true }
 nixq = { path = "../nixq", version = "0.2.1" }
 nixdrv = { path = "../nixdrv", version = "0.2.1" }
 nixstore = { path = "../nixstore", version = "0.2.1" }
@@ -41,7 +40,6 @@ cli-exit = []
 process-pool = [] # reserved; id_effect_process not on crates.io yet
 # Exposes the in-memory fakes (`MockNixEval`, `SyncEval`) for dependents' tests.
 test-support = ["nixstore/test-support"]
-proptest = ["id_effect/proptest", "dep:proptest"]
 
 [lib]
 name = "assay"
@@ -53,6 +51,9 @@ path = "src/main.rs"
 
 [dev-dependencies]
 criterion = "0.8.2"
+# Property tests (laws, claim codec round trips) on `id_effect::testing::property`.
+id_effect = { version = "0.13.0", features = ["schema-serde", "proptest"] }
+proptest = "1"
 nixstore = { path = "../nixstore", version = "0.2.1", features = [
   "test-support",
 ] }

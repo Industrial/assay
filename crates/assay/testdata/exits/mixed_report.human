@@ -1,0 +1,14 @@
+FAIL eq_fail
+  ~ $: 1 -> {"a":[2]}
+PASS eq_pass
+ERR eval_error
+  value is a set while a list was expected
+ERR io_error
+  nix: spawn failed
+PASS law
+ERR slow
+FAIL throws_fail
+  expression evaluated successfully; expected throw
+PASS throws_pass
+
+3/8 passed, 2 failed, 3 errored

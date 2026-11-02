@@ -456,7 +456,7 @@ mod tests {
     failures: usize,
     kind: &'static str,
     retry: bool,
-  ) -> (Exit<CaseVerdict, InfraError>, usize) {
+  ) -> (Exit<CaseVerdict, InfraError>, usize, Duration) {
     let eval = Arc::new(Flaky {
       calls: AtomicUsize::new(0),
       failures,
@@ -472,31 +472,88 @@ mod tests {
       fs: Arc::new(crate::fake::MemFs::default()),
     };
     let exec = TestExecutor::new();
+    let start = exec.now();
     let mut out = expect_exit_success(run_test_on(
       &exec,
       run_cases(vec![("x".to_string(), eq("a", "b"))], caps, o),
     ));
-    (out.remove(0).1, eval.calls.load(Ordering::SeqCst))
+    (
+      out.remove(0).1,
+      eval.calls.load(Ordering::SeqCst),
+      exec.now() - start,
+    )
   }
 
+  /// Each retry waits exactly [`FLAKY_EVAL_DELAY`] on the virtual clock.
   #[test]
   fn retry_flaky_eval_retries_transient_io_failures_at_most_twice() {
-    let (exit, calls) = run_flaky(2, "io", true);
+    let (exit, calls, elapsed) = run_flaky(1, "io", true);
     assert!(matches!(exit, Exit::Success(CaseVerdict::Pass)), "{exit:?}");
-    assert_eq!(calls, 3);
-    let (exit, calls) = run_flaky(5, "io", true);
+    assert_eq!((calls, elapsed), (2, FLAKY_EVAL_DELAY));
+    let (exit, calls, elapsed) = run_flaky(2, "io", true);
+    assert!(matches!(exit, Exit::Success(CaseVerdict::Pass)), "{exit:?}");
+    assert_eq!((calls, elapsed), (3, FLAKY_EVAL_DELAY * 2));
+    let (exit, calls, elapsed) = run_flaky(5, "io", true);
     assert_exit_fail(&exit, &InfraError::Io("flaky".into()));
-    assert_eq!(calls, 3);
+    assert_eq!((calls, elapsed), (3, FLAKY_EVAL_DELAY * 2));
   }
 
   #[test]
   fn retry_is_off_by_default_and_skips_permanent_failures() {
-    let (exit, calls) = run_flaky(1, "io", false);
+    let (exit, calls, elapsed) = run_flaky(1, "io", false);
     assert_exit_fail(&exit, &InfraError::Io("flaky".into()));
-    assert_eq!(calls, 1);
-    let (exit, calls) = run_flaky(1, "nix_missing", true);
+    assert_eq!((calls, elapsed), (1, Duration::ZERO));
+    let (exit, calls, elapsed) = run_flaky(1, "nix_missing", true);
     assert!(matches!(exit, Exit::Failure(_)));
-    assert_eq!(calls, 1);
+    assert_eq!((calls, elapsed), (1, Duration::ZERO));
+  }
+
+  /// Retries of a slow, flaky case run inside its timeout: the deadline cuts the retries off at
+  /// exactly the limit.
+  #[test]
+  fn case_timeout_bounds_the_retries_too() {
+    struct SlowFlaky(AtomicUsize);
+    impl NixEval for SlowFlaky {
+      fn eval_expr(&self, _expr: &str) -> Effect<Value, AssayOutcome> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        sleep(Duration::from_millis(20)).flat_map(|()| {
+          id_effect::fail(AssayOutcome::EvalError {
+            kind: "io".into(),
+            message: "flaky".into(),
+            span: None,
+          })
+        })
+      }
+      fn eval_file(&self, _path: &Path) -> Effect<Value, AssayOutcome> {
+        id_effect::succeed(Value::Null)
+      }
+      fn eval_source(&self, _source: &str) -> Effect<Value, AssayOutcome> {
+        id_effect::succeed(Value::Null)
+      }
+    }
+    let eval = Arc::new(SlowFlaky(AtomicUsize::new(0)));
+    let mut o = opts();
+    o.batch_eval = false;
+    o.retry_flaky_eval = true;
+    o.case_timeout_ms = Some(30);
+    let mut caps = caps(MockNixEval::default());
+    caps.eval = Arc::clone(&eval) as Arc<dyn NixEval>;
+    let exec = TestExecutor::new();
+    let start = exec.now();
+    let out = expect_exit_success(run_test_on(
+      &exec,
+      run_cases(vec![("x".to_string(), eq("a", "b"))], caps, o),
+    ));
+    // Attempt 1 fails at 20ms, attempt 2 starts at 21ms and is interrupted at 30ms.
+    assert_eq!(exec.now() - start, Duration::from_millis(30));
+    assert_eq!(eval.0.load(Ordering::SeqCst), 2);
+    assert_exit_fail(
+      &out[0].1,
+      &InfraError::Timeout {
+        case: "x".into(),
+        limit_ms: 30,
+      },
+    );
   }
 
   #[test]
@@ -531,6 +588,105 @@ mod tests {
       outcomes: vec![("d".into(), Exit::die("bug"))],
     };
     assert_eq!(defect.exit_byte(), 101);
+  }
+
+  /// `slow` evaluates for a minute (on the executor clock); everything else is the mock's.
+  struct SlowFor {
+    slow: &'static str,
+    rest: MockNixEval,
+  }
+
+  impl NixEval for SlowFor {
+    fn eval_expr(&self, expr: &str) -> Effect<Value, AssayOutcome> {
+      if expr.contains(self.slow) {
+        return sleep(Duration::from_secs(60)).map(|()| json!([1, 1]));
+      }
+      self.rest.eval_expr(expr)
+    }
+    fn eval_file(&self, path: &Path) -> Effect<Value, AssayOutcome> {
+      self.rest.eval_file(path)
+    }
+    fn eval_source(&self, source: &str) -> Effect<Value, AssayOutcome> {
+      self.rest.eval_source(source)
+    }
+  }
+
+  /// One case per verdict family (pass, assertion failure, expected throw, eval error, I/O
+  /// failure, timeout, law), run through the run core; the `Exit` and the rendered reports are
+  /// goldens under `testdata/exits/` (`ID_EFFECT_BLESS=1` rewrites them).
+  #[test]
+  fn mixed_run_exit_and_reports_match_goldens() {
+    use id_effect::{assert_golden, assert_golden_exit};
+
+    use crate::report::{ReportFormat, render_report};
+
+    let mock = MockNixEval::default();
+    mock.set("1", EvalResult::Ok(json!(1)));
+    mock.set("2", EvalResult::Ok(json!({"a": [2]})));
+    let error = |kind: &str, message: &str| {
+      EvalResult::Err(AssayOutcome::EvalError {
+        kind: kind.into(),
+        message: message.into(),
+        span: None,
+      })
+    };
+    mock.set("boom", error("throw", "boom"));
+    mock.set(
+      "bad",
+      error("type", "value is a set while a list was expected"),
+    );
+    mock.set("spawn", error("io", "nix: spawn failed"));
+    let cases = vec![
+      ("eq_pass".to_string(), eq("1", "1")),
+      ("eq_fail".to_string(), eq("1", "2")),
+      ("throws_pass".to_string(), throws("boom")),
+      ("throws_fail".to_string(), throws("1")),
+      ("eval_error".to_string(), eq("bad", "1")),
+      ("io_error".to_string(), eq("spawn", "1")),
+      ("slow".to_string(), eq("slow", "1")),
+      (
+        "law".to_string(),
+        Claim::Law {
+          name: "merge_associativity".into(),
+          seed: 7,
+        },
+      ),
+    ];
+    let mut o = opts();
+    o.batch_eval = false;
+    o.case_timeout_ms = Some(250);
+    let exec = TestExecutor::new();
+    let start = exec.now();
+    let exit = run_test_on(
+      &exec,
+      run_cases(
+        cases,
+        caps(SlowFor {
+          slow: "slow",
+          rest: mock,
+        }),
+        o,
+      ),
+    );
+    assert_eq!(exec.now() - start, Duration::from_millis(250));
+    assert_golden_exit("testdata/exits/mixed_run.exit", &exit);
+
+    let report = SuiteReport {
+      outcomes: expect_exit_success(exit),
+    };
+    assert_eq!(report.exit_byte(), 1);
+    let summary = summarize(&report);
+    for (format, ext) in [
+      (ReportFormat::Human, "human"),
+      (ReportFormat::Tap, "tap"),
+      (ReportFormat::Json, "json"),
+    ] {
+      let text = render_report(&report.legacy_outcomes(), format, &summary);
+      assert_golden(
+        format!("testdata/exits/mixed_report.{ext}"),
+        &text.unwrap_or_else(|e| format!("render error: {e}")),
+      );
+    }
   }
 
   #[test]

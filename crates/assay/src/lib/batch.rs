@@ -464,24 +464,34 @@ mod tests {
     expect_exit_success(run_test(slot_outcome(slot, row, store, &fs)))
   }
 
+  /// [`ClaimCaps`] over `eval` and `store` (in-memory filesystem and path-info store).
+  fn batch_caps(eval: impl NixEval + 'static, store: &SnapshotStore) -> ClaimCaps {
+    ClaimCaps {
+      eval: Arc::new(eval),
+      snapshots: store.clone(),
+      path_info: Arc::new(nixstore::MockPathInfoStore::default()),
+      fs: Arc::new(MemFs::default()),
+    }
+  }
+
   /// [`run_batch`] over `eval` and `store`, run to completion.
   fn run_batch_with(
     cases: &[NamedClaim],
     eval: impl NixEval + 'static,
     store: &SnapshotStore,
   ) -> Result<Vec<NamedExit>, InfraError> {
-    let caps = ClaimCaps {
-      eval: Arc::new(eval),
-      snapshots: store.clone(),
-      path_info: Arc::new(nixstore::MockPathInfoStore::default()),
-      fs: Arc::new(MemFs::default()),
-    };
-    run_test(run_batch(cases.to_vec(), caps, Trace::default()))
-      .into_result()
-      .map_err(|c| match c {
-        id_effect::Cause::Fail(e) => e,
-        other => InfraError::Worker(format!("{other:?}")),
-      })
+    batch_result(run_test(run_batch(
+      cases.to_vec(),
+      batch_caps(eval, store),
+      Trace::default(),
+    )))
+  }
+
+  fn batch_result(exit: Exit<Vec<NamedExit>, InfraError>) -> Result<Vec<NamedExit>, InfraError> {
+    exit.into_result().map_err(|c| match c {
+      id_effect::Cause::Fail(e) => e,
+      other => InfraError::Worker(format!("{other:?}")),
+    })
   }
 
   #[test]
@@ -782,9 +792,21 @@ mod tests {
     }));
   }
 
+  fn has_nix() -> bool {
+    std::process::Command::new("nix")
+      .arg("--version")
+      .output()
+      .is_ok_and(|o| o.status.success())
+  }
+
+  /// The batch over the live evaluator (skipped without `nix`). Runs on the default runtime
+  /// (`block_on`): `tokio::process` needs it, the `TestExecutor` has none.
   #[test]
-  #[ignore = "requires nix in PATH"]
   fn live_batch_eq_and_bare_throws() {
+    if !has_nix() {
+      eprintln!("skipping live_batch_eq_and_bare_throws: nix not on PATH");
+      return;
+    }
     let cases = vec![
       (
         "ok".into(),
@@ -809,7 +831,8 @@ mod tests {
       ),
     ];
     let store = SnapshotStore::new(PathBuf::from("/tmp/assay-batch-test-goldens"));
-    let outs = run_batch_with(&cases, LiveNixEval, &store).expect("batch");
+    let run = run_batch(cases, batch_caps(LiveNixEval, &store), Trace::default());
+    let outs = batch_result(run.block_on()).expect("batch");
     assert_eq!(outs.len(), 3);
     assert!(matches!(outs[0].1, Exit::Success(CaseVerdict::Pass)));
     assert!(matches!(outs[1].1, Exit::Success(CaseVerdict::Pass)));

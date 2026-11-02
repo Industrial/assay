@@ -17,6 +17,7 @@ pub use nixstore::PathInfoService;
 use crate::eval::NixEval;
 use crate::files::Fs;
 use crate::live::{LazyPathInfoStore, LiveFs, LiveNixEval};
+#[cfg(any(test, feature = "test-support"))]
 use crate::outcome::AssayOutcome;
 use crate::snapshot::SnapshotStore;
 
@@ -92,10 +93,13 @@ where
   Layer::succeed(hlist![FsService(Arc::new(LiveFs))])
 }
 
-/// Marker for an in-memory / fake nix store used in sandboxed module tests.
+/// Marker for an in-memory / fake nix store used in sandboxed module tests (`cfg(test)` / the
+/// `test-support` feature).
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub struct FakeStore;
 
+#[cfg(any(test, feature = "test-support"))]
 impl FakeStore {
   pub fn allow_ifd(&self) -> bool {
     false
@@ -103,6 +107,7 @@ impl FakeStore {
 }
 
 /// Require a [`FakeStore`] for sandboxed / IFD module evaluation.
+#[cfg(any(test, feature = "test-support"))]
 pub fn require_store(store: Option<&FakeStore>) -> Result<&FakeStore, AssayOutcome> {
   store.ok_or(AssayOutcome::EvalError {
     kind: "sandbox".into(),

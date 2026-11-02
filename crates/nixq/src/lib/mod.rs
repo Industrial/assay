@@ -5,6 +5,7 @@ pub mod commands;
 pub mod diff;
 pub mod error;
 pub mod force_path;
+pub mod live;
 pub mod normalize;
 pub mod path;
 pub mod predicate;

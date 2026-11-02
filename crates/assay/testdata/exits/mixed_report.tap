@@ -1,0 +1,15 @@
+TAP version 13
+1..8
+not ok 1 - eq_fail
+  ~ $: 1 -> {"a":[2]}
+ok 2 - eq_pass
+not ok 3 - eval_error
+  value is a set while a list was expected
+not ok 4 - io_error
+  nix: spawn failed
+ok 5 - law
+not ok 6 - slow
+  timeout
+not ok 7 - throws_fail
+  expression evaluated successfully; expected throw
+ok 8 - throws_pass
