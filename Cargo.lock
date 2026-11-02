@@ -1257,11 +1257,8 @@ name = "nixq"
 version = "0.2.1"
 dependencies = [
  "clap",
- "id_effect 0.4.0",
- "id_effect_cli 0.4.0",
- "id_effect_macro 0.4.0",
- "id_effect_optics",
- "id_effect_proc_macro 0.4.0",
+ "id_effect 0.13.0",
+ "id_effect_cli 0.13.0",
  "nixstore",
  "serde",
  "serde_json",

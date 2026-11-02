@@ -1,253 +1,314 @@
-//! Effect programs for CLI commands.
+//! Effect programs for CLI commands, and the pure renderers for their typed outputs.
+//!
+//! Input bytes become a [`serde_json::Value`] at one parse boundary ([`load_json`]); the query
+//! logic behind each command is plain Rust over that value.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use id_effect::{Effect, Needs, effect};
+use id_effect::{Effect, effect};
+use nixstore::edge::from_result;
+use nixstore::{NixstoreEnv, PathInfoFlags, PathInfoReport};
 use serde_json::Value;
 
-use crate::caps::{JsonSourceKey, NixqEnv};
+use crate::caps::{JsonSourceService, NixqEnv};
 use crate::diff::{structural_diff, values_equal};
 use crate::error::{InfraError, PathError, PredicateResult};
 use crate::force_path::force_paths;
 use crate::normalize::normalize_value;
-use crate::optics::{value_contains_subset, value_has_attrs};
-use crate::path::{get_at_path, parse_attrpath};
+use crate::path::{AttrPath, get_at_path, parse_attrpath};
+use crate::predicate::{value_contains_subset, value_has_attrs};
 
-fn parse_json(bytes: &[u8]) -> Result<Value, InfraError> {
-  serde_json::from_slice(bytes).map_err(|e| InfraError::Json(e.to_string()))
+/// One JSON document as output (`get`, `normalize`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonReport {
+  pub value: Value,
 }
 
+impl JsonReport {
+  /// Pretty-printed JSON (no trailing newline).
+  pub fn render(&self) -> String {
+    serde_json::to_string_pretty(&self.value).unwrap_or_else(|_| self.value.to_string())
+  }
+}
+
+/// Result of `diff`: equal after normalization, or the structural diff lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffReport {
+  Equal,
+  Differs(String),
+}
+
+impl DiffReport {
+  /// The diff text to print (`None` when equal).
+  pub fn render(&self) -> Option<&str> {
+    match self {
+      Self::Equal => None,
+      Self::Differs(diff) => Some(diff),
+    }
+  }
+
+  /// Process exit code: `0` when equal, `1` when the documents differ.
+  pub fn exit_code(&self) -> u8 {
+    match self {
+      Self::Equal => 0,
+      Self::Differs(_) => 1,
+    }
+  }
+}
+
+/// Parses `bytes` read from `input` as one JSON document.
+pub fn parse_json(input: &Path, bytes: &[u8]) -> Result<Value, InfraError> {
+  serde_json::from_slice(bytes).map_err(|e| InfraError::Json {
+    path: input.display().to_string(),
+    message: e.to_string(),
+  })
+}
+
+/// The value at `path` in `value`.
+pub fn lookup(value: &Value, path: &AttrPath) -> Result<Value, PathError> {
+  get_at_path(value, path)
+    .cloned()
+    .ok_or_else(|| PathError::NotFound(path.display()))
+}
+
+/// Structural diff of `left` against `right` (empty / [`DiffReport::Equal`] when equal after
+/// normalization).
+pub fn diff_report(left: &Value, right: &Value) -> DiffReport {
+  if values_equal(left, right) {
+    return DiffReport::Equal;
+  }
+  let diff = structural_diff(&normalize_value(left), &normalize_value(right));
+  if diff.is_empty() {
+    DiffReport::Equal
+  } else {
+    DiffReport::Differs(diff)
+  }
+}
+
+/// Reads `input` through the [`JsonSource`](crate::caps::JsonSource) and parses it.
 pub fn load_json(input: PathBuf) -> Effect<Value, InfraError, NixqEnv> {
-  effect!(|r| {
-      let src = (~JsonSourceKey).clone();
-      let bytes = ~src.read(&input);
-      ~parse_json(&bytes)
+  effect!({
+    let service = ~JsonSourceService;
+    let source = Arc::clone(&service.0);
+    let bytes = ~source.read(&input);
+    ~from_result(parse_json(&input, &bytes))
   })
 }
 
-pub fn cmd_get(input: PathBuf, attrpath: String) -> Effect<Value, InfraError, NixqEnv> {
-  effect!(|r| {
-      let src = (~JsonSourceKey).clone();
-      let bytes = ~src.read(&input);
-      let value = ~parse_json(&bytes);
-      let path = ~parse_attrpath(&attrpath).map_err(|e| InfraError::Json(e.to_string()));
-      ~get_at_path(&value, &path)
-          .cloned()
-          .ok_or_else(|| InfraError::Json(PathError::NotFound(path.display()).to_string()))
+/// `get`: the value at `attrpath`; fails when the path is invalid or absent.
+pub fn get(input: PathBuf, attrpath: String) -> Effect<JsonReport, InfraError, NixqEnv> {
+  effect!({
+    let value = ~load_json(input);
+    let path = ~from_result(parse_attrpath(&attrpath).map_err(InfraError::from));
+    let found = ~from_result(lookup(&value, &path).map_err(InfraError::from));
+    JsonReport { value: found }
   })
 }
 
-pub fn cmd_has_attrs(
+/// `has-attrs`: true when the document is an object with every attr in `attrs`.
+pub fn has_attrs(
   input: PathBuf,
   attrs: Vec<String>,
 ) -> Effect<PredicateResult, InfraError, NixqEnv> {
-  effect!(|r| {
-      let src = (~JsonSourceKey).clone();
-      let bytes = ~src.read(&input);
-      let value = ~parse_json(&bytes);
-      PredicateResult::from_bool(value_has_attrs(&value, &attrs))
+  effect!({
+    let value = ~load_json(input);
+    PredicateResult::from_bool(value_has_attrs(&value, &attrs))
   })
 }
 
-pub fn cmd_subset(
-  input: PathBuf,
-  expected: PathBuf,
-) -> Effect<PredicateResult, InfraError, NixqEnv> {
-  // Multi-read: Effect::new (effect! would join_binds2 adjacent ~reads).
-  Effect::new(move |env| {
-    let src = Needs::<JsonSourceKey>::need(env).clone();
-    let actual = parse_json(&src.read(&input)?)?;
-    let expect = parse_json(&src.read(&expected)?)?;
-    Ok(PredicateResult::from_bool(value_contains_subset(
-      &actual, &expect,
-    )))
+/// `subset`: true when the `expected` document is a structural subset of `input`.
+pub fn subset(input: PathBuf, expected: PathBuf) -> Effect<PredicateResult, InfraError, NixqEnv> {
+  effect!({
+    let actual = ~load_json(input);
+    let expect = ~load_json(expected);
+    PredicateResult::from_bool(value_contains_subset(&actual, &expect))
   })
 }
 
-pub fn cmd_force_path(
+/// `force-path`: true when every attrpath in `paths` is valid and resolves.
+pub fn force_path(
   input: PathBuf,
   paths: Vec<String>,
 ) -> Effect<PredicateResult, InfraError, NixqEnv> {
-  effect!(|r| {
-      let src = (~JsonSourceKey).clone();
-      let bytes = ~src.read(&input);
-      let value = ~parse_json(&bytes);
-      PredicateResult::from_bool(force_paths(&value, &paths).is_ok())
+  effect!({
+    let value = ~load_json(input);
+    PredicateResult::from_bool(force_paths(&value, &paths).is_ok())
   })
 }
 
-pub fn cmd_normalize(input: PathBuf) -> Effect<Value, InfraError, NixqEnv> {
-  effect!(|r| {
-      let src = (~JsonSourceKey).clone();
-      let bytes = ~src.read(&input);
-      let value = ~parse_json(&bytes);
-      normalize_value(&value)
-  })
-}
-
-pub fn cmd_diff(input: PathBuf, right: PathBuf) -> Effect<String, InfraError, NixqEnv> {
-  // Multi-read: Effect::new (effect! would join_binds2 adjacent ~reads).
-  Effect::new(move |env| {
-    let src = Needs::<JsonSourceKey>::need(env).clone();
-    let left = parse_json(&src.read(&input)?)?;
-    let right_v = parse_json(&src.read(&right)?)?;
-    if values_equal(&left, &right_v) {
-      return Ok(String::new());
+/// `normalize`: the normalized document.
+pub fn normalize(input: PathBuf) -> Effect<JsonReport, InfraError, NixqEnv> {
+  effect!({
+    let value = ~load_json(input);
+    JsonReport {
+      value: normalize_value(&value),
     }
-    Ok(structural_diff(
-      &normalize_value(&left),
-      &normalize_value(&right_v),
-    ))
   })
 }
 
-/// Delegate path-info to nixstore as an Effect (wire `NixstoreEnv` at the CLI edge).
-pub fn cmd_path_info(
+/// `diff`: structural diff of `input` against `right`.
+pub fn diff(input: PathBuf, right: PathBuf) -> Effect<DiffReport, InfraError, NixqEnv> {
+  effect!({
+    let left = ~load_json(input);
+    let right = ~load_json(right);
+    diff_report(&left, &right)
+  })
+}
+
+/// `path-info`: delegates to [`nixstore::path_info`] (provide `nixstore::layer` at the edge).
+pub fn path_info(
   paths: Vec<String>,
-  flags: nixstore::PathInfoFlags,
-) -> Effect<Value, nixstore::InfraError, nixstore::NixstoreEnv> {
-  nixstore::cmd_path_info(paths, flags)
+  flags: PathInfoFlags,
+) -> Effect<PathInfoReport, InfraError, NixstoreEnv> {
+  nixstore::path_info(paths, flags).map_err(InfraError::from)
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::caps::{JsonSourceKey, MockJsonSource, mock_providers};
-  use id_effect::{Cap, Exit, FromEnv, build_env, run_test};
-  use std::sync::Arc;
+  use crate::caps::MockJsonSource;
+  use id_effect::{assert_exit_fail, expect_exit_failure, expect_exit_success, run_test};
 
-  fn env_with(mock: Arc<MockJsonSource>) -> NixqEnv {
-    let mut raw = build_env(mock_providers()).expect("env");
-    raw.insert::<Cap<JsonSourceKey>>(mock as JsonSourceKey);
-    NixqEnv::from_env(raw)
-  }
-
-  #[test]
-  fn cmd_get_reads_attrpath() {
-    let mock = Arc::new(MockJsonSource::default());
-    mock.set_file("in.json", br#"{"a":{"b":2}}"#);
-    let exit = run_test(
-      cmd_get(PathBuf::from("in.json"), "a.b".into()),
-      env_with(mock),
-    );
-    assert!(matches!(exit, Exit::Success(v) if v == serde_json::json!(2)));
-  }
-
-  #[test]
-  fn cmd_has_attrs_predicate() {
-    let mock = Arc::new(MockJsonSource::default());
-    mock.set_file("in.json", br#"{"a":1,"b":2}"#);
-    let exit = run_test(
-      cmd_has_attrs(PathBuf::from("in.json"), vec!["a".into()]),
-      env_with(mock),
-    );
-    assert!(matches!(exit, Exit::Success(PredicateResult::True)));
-  }
-
-  #[test]
-  fn cmd_subset_false_when_missing() {
-    let mock = Arc::new(MockJsonSource::default());
-    mock.set_file("a.json", br#"{"a":1}"#);
-    mock.set_file("e.json", br#"{"b":1}"#);
-    let exit = run_test(
-      cmd_subset(PathBuf::from("a.json"), PathBuf::from("e.json")),
-      env_with(mock),
-    );
-    assert!(matches!(exit, Exit::Success(PredicateResult::False)));
-  }
-
-  #[test]
-  fn cmd_force_path_and_normalize() {
-    let mock = Arc::new(MockJsonSource::default());
-    mock.set_file(
-      "d.json",
-      br#"{"outPath":"/nix/store/x","name":"x","builder":"b"}"#,
-    );
-    let exit = run_test(
-      cmd_force_path(PathBuf::from("d.json"), vec!["outPath".into()]),
-      env_with(mock.clone()),
-    );
-    assert!(matches!(exit, Exit::Success(PredicateResult::True)));
-
-    let exit = run_test(cmd_normalize(PathBuf::from("d.json")), env_with(mock));
-    match exit {
-      Exit::Success(v) => {
-        assert_eq!(v["type"], "derivation");
-        assert_eq!(v["outPath"], "/nix/store/x");
-      }
-      other => panic!("unexpected {other:?}"),
+  fn source(files: &[(&str, &str)]) -> JsonSourceService {
+    let mock = MockJsonSource::default();
+    for (path, body) in files {
+      mock.set_file(*path, body.as_bytes());
     }
+    JsonSourceService(Arc::new(mock))
+  }
+
+  fn run<A: Send + 'static>(
+    program: Effect<A, InfraError, NixqEnv>,
+    files: &[(&str, &str)],
+  ) -> id_effect::Exit<A, InfraError> {
+    run_test(program.provide(source(files)))
   }
 
   #[test]
-  fn cmd_diff_equal_and_unequal() {
-    let mock = Arc::new(MockJsonSource::default());
-    mock.set_file("l.json", br#"{"a":1}"#);
-    mock.set_file("r.json", br#"{"a":1}"#);
-    let exit = run_test(
-      cmd_diff(PathBuf::from("l.json"), PathBuf::from("r.json")),
-      env_with(mock.clone()),
-    );
-    assert!(matches!(exit, Exit::Success(s) if s.is_empty()));
-
-    mock.set_file("r2.json", br#"{"a":2}"#);
-    let exit = run_test(
-      cmd_diff(PathBuf::from("l.json"), PathBuf::from("r2.json")),
-      env_with(mock),
-    );
-    assert!(matches!(exit, Exit::Success(s) if s.contains("~ $.a")));
+  fn get_reads_attrpath() {
+    let report = expect_exit_success(run(
+      get("in.json".into(), "a.b".into()),
+      &[("in.json", r#"{"a":{"b":2}}"#)],
+    ));
+    assert_eq!(report.value, serde_json::json!(2));
+    assert_eq!(report.render(), "2");
   }
 
   #[test]
-  fn load_json_and_error_paths() {
-    let mock = Arc::new(MockJsonSource::default());
-    mock.set_file("ok.json", br#"{"k":1}"#);
-    mock.set_file("bad.json", b"not-json");
+  fn get_fails_on_missing_or_invalid_path() {
+    let files = [("obj.json", r#"{"a":1}"#)];
+    assert_exit_fail(
+      &run(get("obj.json".into(), "missing".into()), &files),
+      &InfraError::Path(PathError::NotFound("$.missing".into())),
+    );
     assert!(matches!(
-      run_test(load_json(PathBuf::from("ok.json")), env_with(mock.clone())),
-      Exit::Success(_)
+      expect_exit_failure(run(get("obj.json".into(), ".".into()), &files)),
+      InfraError::Path(PathError::Invalid(_))
     ));
-    assert!(matches!(
-      run_test(load_json(PathBuf::from("bad.json")), env_with(mock.clone())),
-      Exit::Failure(_)
-    ));
+  }
 
-    mock.set_file("obj.json", br#"{"a":1}"#);
+  #[test]
+  fn has_attrs_predicate() {
+    let files = [("in.json", r#"{"a":1,"b":2}"#)];
+    assert_eq!(
+      expect_exit_success(run(has_attrs("in.json".into(), vec!["a".into()]), &files)),
+      PredicateResult::True
+    );
+    assert_eq!(
+      expect_exit_success(run(has_attrs("in.json".into(), vec!["z".into()]), &files)),
+      PredicateResult::False
+    );
+  }
+
+  #[test]
+  fn subset_reads_both_documents() {
+    let files = [
+      ("a.json", r#"{"a":1,"c":3}"#),
+      ("e.json", r#"{"a":1}"#),
+      ("b.json", r#"{"b":1}"#),
+    ];
+    assert_eq!(
+      expect_exit_success(run(subset("a.json".into(), "e.json".into()), &files)),
+      PredicateResult::True
+    );
+    assert_eq!(
+      expect_exit_success(run(subset("a.json".into(), "b.json".into()), &files)),
+      PredicateResult::False
+    );
+  }
+
+  #[test]
+  fn force_path_and_normalize() {
+    let files = [(
+      "d.json",
+      r#"{"outPath":"/nix/store/x","name":"x","builder":"b"}"#,
+    )];
+    assert_eq!(
+      expect_exit_success(run(
+        force_path("d.json".into(), vec!["outPath".into()]),
+        &files
+      )),
+      PredicateResult::True
+    );
+    assert_eq!(
+      expect_exit_success(run(
+        force_path("d.json".into(), vec!["outPath.x".into()]),
+        &files
+      )),
+      PredicateResult::False
+    );
+    let report = expect_exit_success(run(normalize("d.json".into()), &files));
+    assert_eq!(report.value["type"], "derivation");
+    assert_eq!(report.value["outPath"], "/nix/store/x");
+  }
+
+  #[test]
+  fn diff_equal_and_unequal() {
+    let files = [
+      ("l.json", r#"{"a":1}"#),
+      ("r.json", r#"{"a":1}"#),
+      ("r2.json", r#"{"a":2}"#),
+    ];
+    let equal = expect_exit_success(run(diff("l.json".into(), "r.json".into()), &files));
+    assert_eq!(equal, DiffReport::Equal);
+    assert_eq!((equal.render(), equal.exit_code()), (None, 0));
+    let differs = expect_exit_success(run(diff("l.json".into(), "r2.json".into()), &files));
+    assert!(differs.render().is_some_and(|d| d.contains("~ $.a")));
+    assert_eq!(differs.exit_code(), 1);
+  }
+
+  #[test]
+  fn bad_json_and_missing_input_fail() {
+    let files = [("bad.json", "not-json")];
     assert!(matches!(
-      run_test(
-        cmd_get(PathBuf::from("obj.json"), "missing".into()),
-        env_with(mock.clone())
-      ),
-      Exit::Failure(_)
+      expect_exit_failure(run(load_json("bad.json".into()), &files)),
+      InfraError::Json { ref path, .. } if path == "bad.json"
     ));
     assert!(matches!(
-      run_test(
-        cmd_get(PathBuf::from("obj.json"), ".".into()),
-        env_with(mock.clone())
-      ),
-      Exit::Failure(_)
+      expect_exit_failure(run(normalize("absent.json".into()), &files)),
+      InfraError::Io { .. }
     ));
+  }
+
+  #[test]
+  fn json_report_renders_pretty() {
+    let report = JsonReport {
+      value: serde_json::json!({"b": 2, "a": [3, 1]}),
+    };
+    assert_eq!(
+      report.render(),
+      "{\n  \"a\": [\n    3,\n    1\n  ],\n  \"b\": 2\n}"
+    );
+  }
+
+  #[test]
+  fn diff_report_is_pure() {
+    let a = serde_json::json!({"a": 1});
+    assert_eq!(diff_report(&a, &a), DiffReport::Equal);
     assert!(matches!(
-      run_test(
-        cmd_has_attrs(PathBuf::from("obj.json"), vec!["z".into()]),
-        env_with(mock.clone())
-      ),
-      Exit::Success(PredicateResult::False)
-    ));
-    assert!(matches!(
-      run_test(
-        cmd_force_path(PathBuf::from("obj.json"), vec!["a.b".into()]),
-        env_with(mock.clone())
-      ),
-      Exit::Success(PredicateResult::False)
-    ));
-    mock.set_file("e.json", br#"{"a":1}"#);
-    assert!(matches!(
-      run_test(
-        cmd_subset(PathBuf::from("obj.json"), PathBuf::from("e.json")),
-        env_with(mock)
-      ),
-      Exit::Success(PredicateResult::True)
+      diff_report(&a, &serde_json::json!({"a": 2})),
+      DiffReport::Differs(_)
     ));
   }
 }
@@ -255,29 +316,34 @@ mod tests {
 #[cfg(test)]
 mod path_info_tests {
   use super::*;
-  use id_effect::{FromEnv, run_blocking};
-  use nixstore::PathInfoFlags;
+  use id_effect::{assert_exit_fail, expect_exit_success, run_test};
+  use nixstore::{MockPathInfoStore, PathInfoService};
+
+  const A: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a";
 
   #[test]
   fn path_info_fixture_json() {
-    let root =
-      std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../nixstore/fixtures/minimal");
-    let path = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a".to_string();
-    let env = nixstore::NixstoreEnv::from_env(nixstore::providers_for_store(&root));
-    let v = run_blocking(
-      cmd_path_info(
-        vec![path.clone()],
-        PathInfoFlags {
-          json: true,
-          closure_size: true,
-          referrers: true,
-          ..Default::default()
-        },
-      ),
-      env,
-    )
-    .expect("query");
-    assert_eq!(v[&path]["narSize"], 100);
-    assert_eq!(v[&path]["closureSize"], 350);
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../nixstore/fixtures/minimal");
+    let flags = PathInfoFlags {
+      json: true,
+      closure_size: true,
+      referrers: true,
+      ..Default::default()
+    };
+    let report = expect_exit_success(run_test(
+      path_info(vec![A.into()], flags).provide_layer(nixstore::layer(root)),
+    ));
+    let v = report.to_json_value();
+    assert_eq!(v[A]["narSize"], 100);
+    assert_eq!(v[A]["closureSize"], 350);
+  }
+
+  #[test]
+  fn path_info_unknown_path_widens_store_error() {
+    let store = PathInfoService(Arc::new(MockPathInfoStore::default()));
+    assert_exit_fail(
+      &run_test(path_info(vec![A.into()], PathInfoFlags::default()).provide(store)),
+      &InfraError::Store(nixstore::InfraError::UnknownPath(A.into())),
+    );
   }
 }

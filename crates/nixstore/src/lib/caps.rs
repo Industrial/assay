@@ -3,10 +3,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use id_effect::{Effect, Layer, caps, fail, hlist, succeed, suspend, sync};
+use id_effect::{Effect, Layer, caps, hlist, suspend, sync};
 use rusqlite::Connection;
 
 use crate::db::{open_store_db, query_path_info};
+use crate::edge::from_result;
 use crate::error::InfraError;
 use crate::model::{PathInfo, QueryOpts};
 
@@ -21,14 +22,6 @@ pub struct PathInfoService(pub Arc<dyn PathInfoStore>);
 
 /// Everything nixstore commands need.
 pub type NixstoreEnv = caps!(PathInfoService);
-
-/// Lifts a finished `Result` into an effect.
-fn from_result<A, E, R>(result: Result<A, E>) -> Effect<A, E, R> {
-  match result {
-    Ok(a) => succeed(a),
-    Err(e) => fail(e),
-  }
-}
 
 /// Sqlite-backed store over one read-only connection to `{store_root}/var/nix/db/db.sqlite`.
 ///
@@ -101,7 +94,8 @@ mod fake {
 
   use id_effect::{Effect, suspend};
 
-  use super::{PathInfoStore, from_result};
+  use super::PathInfoStore;
+  use crate::edge::from_result;
   use crate::error::InfraError;
   use crate::model::{PathInfo, QueryOpts};
 

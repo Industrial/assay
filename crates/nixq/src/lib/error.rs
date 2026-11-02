@@ -2,13 +2,18 @@
 
 use thiserror::Error;
 
-/// Infra failures (I/O, JSON parse) — map to Fail / non-predicate exit.
+/// Failures of nixq commands (I/O, JSON parse, attrpath, store) — typed `Fail`, never a
+/// predicate outcome.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum InfraError {
   #[error("io error at {path}: {message}")]
   Io { path: String, message: String },
-  #[error("json parse error: {0}")]
-  Json(String),
+  #[error("json parse error in {path}: {message} (input must be one JSON document)")]
+  Json { path: String, message: String },
+  #[error(transparent)]
+  Path(#[from] PathError),
+  #[error(transparent)]
+  Store(#[from] nixstore::InfraError),
 }
 
 /// Attrpath parse / resolve failures.
@@ -35,6 +40,14 @@ impl PredicateResult {
   pub fn from_bool(v: bool) -> Self {
     if v { Self::True } else { Self::False }
   }
+
+  /// Process exit code: `0` when true, `1` when false.
+  pub fn exit_code(self) -> u8 {
+    match self {
+      Self::True => 0,
+      Self::False => 1,
+    }
+  }
 }
 
 #[cfg(test)]
@@ -47,12 +60,27 @@ mod tests {
     assert!(!PredicateResult::False.as_bool());
     assert_eq!(PredicateResult::from_bool(true), PredicateResult::True);
     assert_eq!(PredicateResult::from_bool(false), PredicateResult::False);
+    assert_eq!(PredicateResult::True.exit_code(), 0);
+    assert_eq!(PredicateResult::False.exit_code(), 1);
     let io = InfraError::Io {
       path: "p".into(),
       message: "m".into(),
     };
     assert!(io.to_string().contains("io error"));
-    assert!(InfraError::Json("x".into()).to_string().contains("json"));
+    let json = InfraError::Json {
+      path: "in.json".into(),
+      message: "x".into(),
+    };
+    assert!(json.to_string().contains("json parse error in in.json"));
+    assert_eq!(
+      InfraError::from(PathError::NotFound("a".into())).to_string(),
+      "path not found: a"
+    );
+    assert!(
+      InfraError::from(nixstore::InfraError::UnknownPath("/nix/store/x".into()))
+        .to_string()
+        .contains("unknown store path")
+    );
     assert!(
       PathError::Invalid("i".into())
         .to_string()

@@ -3,6 +3,7 @@
 pub mod caps;
 pub mod commands;
 pub mod db;
+pub mod edge;
 pub mod error;
 pub mod model;
 
@@ -11,6 +12,7 @@ pub use caps::MockPathInfoStore;
 pub use caps::{NixstoreEnv, PathInfoService, PathInfoStore, SqlitePathInfoStore, layer};
 pub use commands::{PathInfoFlags, PathInfoReport, path_info, resolve_store_root};
 pub use db::{DEFAULT_STORE_ROOT, db_path_for_store, open_db, open_store_db, query_path_info};
+pub use edge::{CliError, from_result, print_line, run_main_coded};
 pub use error::InfraError;
 pub use model::{PathInfo, QueryOpts, db_hash_to_sri, human_bytes};
 

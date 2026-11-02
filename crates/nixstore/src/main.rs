@@ -1,16 +1,15 @@
 //! nixstore CLI — read-only path-info over db.sqlite.
 
-use std::fmt;
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
-use id_effect::{Effect, HNil, fail, succeed, suspend};
+use id_effect::HNil;
 use id_effect_cli::{RunMainConfig, run_main};
 
 use nixstore::caps::layer;
-use nixstore::commands::{PathInfoFlags, PathInfoReport, path_info, resolve_store_root};
+use nixstore::commands::{PathInfoFlags, path_info, resolve_store_root};
+use nixstore::edge::{CliError, print_line};
 use nixstore::error::InfraError;
 
 #[derive(Parser)]
@@ -92,33 +91,10 @@ fn main() -> ExitCode {
       let root = resolve_store_root(store);
       let program = path_info(paths, flags.clone())
         .provide_layer(layer(root))
-        .flat_map(move |report| print_report(report, flags))
+        .flat_map(move |report| print_line::<InfraError>(report.render(&flags)))
         .map_err(CliError);
       // Ctrl-C interrupts (finalizers run, exit 130); typed failure 1; defect 101.
       run_main(program, HNil, RunMainConfig::minimal())
     }
-  }
-}
-
-/// Writes the rendered report (plus newline) to stdout.
-fn print_report(report: PathInfoReport, flags: PathInfoFlags) -> Effect<(), InfraError> {
-  suspend(move || {
-    let mut out = std::io::stdout().lock();
-    match writeln!(out, "{}", report.render(&flags)) {
-      Ok(()) => succeed(()),
-      Err(e) => fail(InfraError::Io {
-        path: "<stdout>".into(),
-        message: e.to_string(),
-      }),
-    }
-  })
-}
-
-/// `run_main` prints failures with `Debug`; this shows the `Display` message instead.
-struct CliError(InfraError);
-
-impl fmt::Debug for CliError {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    fmt::Display::fmt(&self.0, f)
   }
 }

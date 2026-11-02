@@ -2,7 +2,7 @@
 
 JSON/attrpath query library and CLI on [id_effect](https://github.com/).
 
-**Doctrine:** pure value algebra (`get`, `hasAttrs`, `subset`, `normalize`, `diff`, `force-path`); I/O via DI 3.0 `JsonSource` + `effect!`/`~Key`; CLI = `run_with` / `run_blocking` + `id_effect_cli` exit codes. `path-info` composes `nixstore` Effects.
+**Doctrine:** pure value algebra (`get`, `hasAttrs`, `subset`, `normalize`, `diff`, `force-path`); I/O via the `JsonSource` capability (`JsonSourceService`, `layer()`) + `effect!`; commands return typed outputs rendered at the edge; CLI runs through `id_effect_cli::run_main` (via `nixstore::edge::run_main_coded`). `path-info` composes `nixstore` Effects.
 
 ## CLI
 
@@ -15,7 +15,7 @@ nixq normalize -f value.json
 nixq diff -f left.json --right right.json
 ```
 
-Predicate exit: `0` = true, `1` = false, `≥2` = infra (I/O / parse).
+Exit: `0` = true / ok, `1` = false / documents differ / I/O or parse failure, `2` = usage error or any `path-info` failure, `101` = defect, `130` = Ctrl-C.
 
 ## Library
 

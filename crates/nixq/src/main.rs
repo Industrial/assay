@@ -1,18 +1,19 @@
 //! nixq CLI — JSON/attrpath query on id_effect.
+//!
+//! Exit codes: `0` ok / predicate true / documents equal; `1` predicate false, documents differ
+//! or a typed failure of a JSON command (I/O, bad JSON, attrpath); `2` usage errors and any
+//! `path-info` failure; `101` defect; `130` Ctrl-C (finalizers run).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
-use id_effect::failure::pretty_cause;
-use id_effect::{Cause, FromEnv, RunError, run_blocking, run_with};
-use id_effect_cli::exit_code_for_cause;
+use id_effect::{Effect, succeed};
 
-use nixq::caps::live_providers;
-use nixq::commands::{
-  cmd_diff, cmd_force_path, cmd_get, cmd_has_attrs, cmd_normalize, cmd_path_info, cmd_subset,
-};
+use nixq::caps::{NixqEnv, layer};
+use nixq::commands::{diff, force_path, get, has_attrs, normalize, path_info, subset};
 use nixq::error::{InfraError, PredicateResult};
+use nixstore::edge::{CliError, print_line, run_main_coded};
 
 #[derive(Parser)]
 #[command(
@@ -97,12 +98,16 @@ fn main() -> ExitCode {
   let matches = cmd.get_matches();
   let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
   match cli.command {
-    Commands::Get { attrpath, file } => run_value(cmd_get(file, attrpath)),
-    Commands::HasAttrs { attrs, file } => run_pred(cmd_has_attrs(file, attrs)),
-    Commands::Subset { expected, file } => run_pred(cmd_subset(file, expected)),
-    Commands::ForcePath { paths, file } => run_pred(cmd_force_path(file, paths)),
-    Commands::Normalize { file } => run_value(cmd_normalize(file)),
-    Commands::Diff { right, file } => run_diff(cmd_diff(file, right)),
+    Commands::Get { attrpath, file } => {
+      run_json(get(file, attrpath), |r| emit(Some(r.render()), 0))
+    }
+    Commands::HasAttrs { attrs, file } => run_json(has_attrs(file, attrs), predicate),
+    Commands::Subset { expected, file } => run_json(subset(file, expected), predicate),
+    Commands::ForcePath { paths, file } => run_json(force_path(file, paths), predicate),
+    Commands::Normalize { file } => run_json(normalize(file), |r| emit(Some(r.render()), 0)),
+    Commands::Diff { right, file } => run_json(diff(file, right), |d| {
+      emit(d.render().map(str::to_owned), d.exit_code())
+    }),
     Commands::PathInfo {
       paths,
       json,
@@ -117,87 +122,47 @@ fn main() -> ExitCode {
         eprintln!("nixq path-info: at least one PATH required");
         return ExitCode::from(2);
       }
+      let flags = nixstore::PathInfoFlags {
+        json,
+        size,
+        closure_size,
+        human_readable,
+        sigs,
+        referrers,
+      };
       let root = nixstore::resolve_store_root(store);
-      let env = nixstore::NixstoreEnv::from_env(nixstore::providers_for_store(&root));
-      match run_blocking(
-        cmd_path_info(
-          paths,
-          nixstore::PathInfoFlags {
-            json,
-            size,
-            closure_size,
-            human_readable,
-            sigs,
-            referrers,
-          },
-        ),
-        env,
-      ) {
-        Ok(v) => {
-          if let Some(text) = v.get("__text__").and_then(|t| t.as_str()) {
-            println!("{text}");
-          } else {
-            println!(
-              "{}",
-              serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())
-            );
-          }
-          ExitCode::SUCCESS
-        }
-        Err(e) => {
-          eprintln!("{e}");
-          ExitCode::from(2)
-        }
-      }
+      let program = path_info(paths, flags.clone())
+        .provide_layer(nixstore::layer(root))
+        .flat_map(move |report| emit(Some(report.render(&flags)), 0))
+        .map_err(CliError);
+      // Any path-info failure (unknown path, missing db, ...) exits 2.
+      run_main_coded(program, 2)
     }
   }
 }
 
-fn run_value(effect: id_effect::Effect<serde_json::Value, InfraError, nixq::NixqEnv>) -> ExitCode {
-  match run_with(live_providers(), effect) {
-    Ok(v) => {
-      println!(
-        "{}",
-        serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())
-      );
-      ExitCode::SUCCESS
-    }
-    Err(err) => exit_from_run_error(err),
+/// Runs a JSON command on the live `JsonSource`; `show` turns its output into stdout + exit code.
+/// A typed failure exits 1 (Ctrl-C 130, defect 101).
+fn run_json<A: Send + 'static>(
+  command: Effect<A, InfraError, NixqEnv>,
+  show: fn(A) -> Effect<u8, InfraError>,
+) -> ExitCode {
+  let program = command
+    .provide_layer(layer())
+    .flat_map(show)
+    .map_err(CliError);
+  run_main_coded(program, 1)
+}
+
+/// Prints `stdout` (when any, plus newline) and ends with exit code `code`.
+fn emit(stdout: Option<String>, code: u8) -> Effect<u8, InfraError> {
+  match stdout {
+    Some(text) => print_line(text).map(move |()| code),
+    None => succeed(code),
   }
 }
 
-fn run_pred(effect: id_effect::Effect<PredicateResult, InfraError, nixq::NixqEnv>) -> ExitCode {
-  match run_with(live_providers(), effect) {
-    Ok(PredicateResult::True) => ExitCode::SUCCESS,
-    Ok(PredicateResult::False) => ExitCode::from(1),
-    Err(err) => exit_from_run_error(err),
-  }
-}
-
-fn run_diff(effect: id_effect::Effect<String, InfraError, nixq::NixqEnv>) -> ExitCode {
-  match run_with(live_providers(), effect) {
-    Ok(diff) => {
-      if diff.is_empty() {
-        ExitCode::SUCCESS
-      } else {
-        println!("{diff}");
-        ExitCode::from(1)
-      }
-    }
-    Err(err) => exit_from_run_error(err),
-  }
-}
-
-fn exit_from_run_error(err: RunError<InfraError>) -> ExitCode {
-  let cause = match err {
-    RunError::Effect(e) => Cause::Fail(e),
-    other => Cause::Fail(InfraError::Json(other.to_string())),
-  };
-  eprintln!("{}", pretty_cause(&cause));
-  let code = exit_code_for_cause(cause);
-  if code == ExitCode::SUCCESS {
-    ExitCode::from(2)
-  } else {
-    code
-  }
+/// Predicates print nothing: true exits 0, false exits 1.
+fn predicate(result: PredicateResult) -> Effect<u8, InfraError> {
+  emit(None, result.exit_code())
 }
