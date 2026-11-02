@@ -1,15 +1,16 @@
 //! nixstore CLI — read-only path-info over db.sqlite.
 
+use std::fmt;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, Subcommand};
-use id_effect::failure::pretty_cause;
-use id_effect::{Cause, FromEnv, run_blocking};
-use id_effect_cli::exit_code_for_cause;
+use id_effect::{Effect, HNil, fail, succeed, suspend};
+use id_effect_cli::{RunMainConfig, run_main};
 
-use nixstore::caps::{NixstoreEnv, providers_for_store};
-use nixstore::commands::{PathInfoFlags, cmd_path_info, resolve_store_root};
+use nixstore::caps::layer;
+use nixstore::commands::{PathInfoFlags, PathInfoReport, path_info, resolve_store_root};
 use nixstore::error::InfraError;
 
 #[derive(Parser)]
@@ -89,31 +90,35 @@ fn main() -> ExitCode {
         referrers,
       };
       let root = resolve_store_root(store);
-      let env = NixstoreEnv::from_env(providers_for_store(&root));
-      match run_blocking(cmd_path_info(paths, flags), env) {
-        Ok(v) => {
-          if let Some(text) = v.get("__text__").and_then(|t| t.as_str()) {
-            println!("{text}");
-          } else {
-            println!(
-              "{}",
-              serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())
-            );
-          }
-          ExitCode::SUCCESS
-        }
-        Err(e) => exit_from_cause(Cause::Fail(e)),
-      }
+      let program = path_info(paths, flags.clone())
+        .provide_layer(layer(root))
+        .flat_map(move |report| print_report(report, flags))
+        .map_err(CliError);
+      // Ctrl-C interrupts (finalizers run, exit 130); typed failure 1; defect 101.
+      run_main(program, HNil, RunMainConfig::minimal())
     }
   }
 }
 
-fn exit_from_cause(cause: Cause<InfraError>) -> ExitCode {
-  eprintln!("{}", pretty_cause(&cause));
-  let code = exit_code_for_cause(cause);
-  if code == ExitCode::SUCCESS {
-    ExitCode::from(2)
-  } else {
-    code
+/// Writes the rendered report (plus newline) to stdout.
+fn print_report(report: PathInfoReport, flags: PathInfoFlags) -> Effect<(), InfraError> {
+  suspend(move || {
+    let mut out = std::io::stdout().lock();
+    match writeln!(out, "{}", report.render(&flags)) {
+      Ok(()) => succeed(()),
+      Err(e) => fail(InfraError::Io {
+        path: "<stdout>".into(),
+        message: e.to_string(),
+      }),
+    }
+  })
+}
+
+/// `run_main` prints failures with `Debug`; this shows the `Display` message instead.
+struct CliError(InfraError);
+
+impl fmt::Debug for CliError {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fmt::Display::fmt(&self.0, f)
   }
 }

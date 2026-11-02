@@ -893,13 +893,29 @@ checksum = "82526e3a02ceb6c6159802cd6fc217f86db8ed98ab294e98650e5a940d823768"
 dependencies = [
  "flume",
  "futures",
- "id_effect_macro",
- "id_effect_proc_macro",
+ "id_effect_macro 0.4.0",
+ "id_effect_proc_macro 0.4.0",
  "im",
  "jiff",
  "proptest",
  "rayon",
  "serde_json",
+ "sysinfo",
+ "tokio",
+]
+
+[[package]]
+name = "id_effect"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30042bd237da4b9f84f53a157abf20c0a999a5691b4e234e0cc51888454b8101"
+dependencies = [
+ "flume",
+ "futures",
+ "id_effect_macro 0.13.0",
+ "id_effect_proc_macro 0.13.0",
+ "jiff",
+ "rayon",
  "sysinfo",
  "tokio",
 ]
@@ -911,10 +927,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5d237981984f0509d52f1f7f1ff9636fa070504bb5ceaa0890d6d2387f464af"
 dependencies = [
  "clap",
- "id_effect",
+ "id_effect 0.4.0",
  "serde",
  "serde_json",
  "toml",
+]
+
+[[package]]
+name = "id_effect_cli"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e833f68a10ec6439cce232b5d10b8b0e337559c7280f4338f6c778d23a9c1462"
+dependencies = [
+ "clap",
+ "id_effect 0.13.0",
+ "tokio",
 ]
 
 [[package]]
@@ -924,12 +951,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69b5bc0d9464ccd40e1e4d0833753c7d8fa51a1a27838cde1bafc4b5ca4ac397"
 
 [[package]]
+name = "id_effect_macro"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5beb87e349171f6422861291d91706561437f481c4abd032e5d1ea4c0860f00e"
+
+[[package]]
 name = "id_effect_optics"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92adc3b7cf8af6aa784c0809f633a99517bab0ffb97bf2c659f1f90b473cedb7"
 dependencies = [
- "id_effect",
+ "id_effect 0.4.0",
  "im",
  "serde",
  "serde_json",
@@ -941,6 +974,17 @@ name = "id_effect_proc_macro"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "30d6cedd32fc1fa75608214f2e2487388655ed374765e2802724aee3d829ac67"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "id_effect_proc_macro"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "166c1f22cfb58dbbf5e202e5d6e3da9d9793205ab8d14cf1297780eed01bf7f3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1157,11 +1201,11 @@ dependencies = [
  "anyhow",
  "clap",
  "criterion",
- "id_effect",
- "id_effect_cli",
- "id_effect_macro",
+ "id_effect 0.4.0",
+ "id_effect_cli 0.4.0",
+ "id_effect_macro 0.4.0",
  "id_effect_optics",
- "id_effect_proc_macro",
+ "id_effect_proc_macro 0.4.0",
  "nixdrv",
  "nixq",
  "nixstore",
@@ -1177,10 +1221,10 @@ version = "0.2.1"
 dependencies = [
  "clap",
  "hex",
- "id_effect",
- "id_effect_cli",
- "id_effect_macro",
- "id_effect_proc_macro",
+ "id_effect 0.4.0",
+ "id_effect_cli 0.4.0",
+ "id_effect_macro 0.4.0",
+ "id_effect_proc_macro 0.4.0",
  "nixq",
  "rstest",
  "serde",
@@ -1196,10 +1240,10 @@ dependencies = [
  "base64",
  "clap",
  "hex",
- "id_effect",
- "id_effect_cli",
- "id_effect_macro",
- "id_effect_proc_macro",
+ "id_effect 0.4.0",
+ "id_effect_cli 0.4.0",
+ "id_effect_macro 0.4.0",
+ "id_effect_proc_macro 0.4.0",
  "nixdrv",
  "reqwest",
  "serde",
@@ -1213,11 +1257,11 @@ name = "nixq"
 version = "0.2.1"
 dependencies = [
  "clap",
- "id_effect",
- "id_effect_cli",
- "id_effect_macro",
+ "id_effect 0.4.0",
+ "id_effect_cli 0.4.0",
+ "id_effect_macro 0.4.0",
  "id_effect_optics",
- "id_effect_proc_macro",
+ "id_effect_proc_macro 0.4.0",
  "nixstore",
  "serde",
  "serde_json",
@@ -1231,10 +1275,8 @@ dependencies = [
  "base64",
  "clap",
  "hex",
- "id_effect",
- "id_effect_cli",
- "id_effect_macro",
- "id_effect_proc_macro",
+ "id_effect 0.13.0",
+ "id_effect_cli 0.13.0",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1908,6 +1950,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "signal-hook-registry"
+version = "1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+dependencies = [
+ "errno",
+ "libc",
+]
+
+[[package]]
 name = "sized-chunks"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2120,6 +2172,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

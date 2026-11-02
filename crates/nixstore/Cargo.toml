@@ -21,14 +21,16 @@ hex = "0.4"
 base64 = "0.22"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
-id_effect = { version = "0.4.0", features = ["schema-serde"] }
-id_effect_macro = "0.4.0"
-id_effect_proc_macro = "0.4.0"
-id_effect_cli = { version = "0.4.0", optional = true }
+id_effect = "0.13.0"
+# The bin's run edge (`run_main`: Ctrl-C -> 130, defect -> 101); always linked.
+id_effect_cli = "0.13.0"
 
 [features]
 default = ["cli-exit"]
-cli-exit = ["dep:id_effect_cli"]
+# Kept for compatibility: id_effect_cli is no longer optional, so this is a no-op.
+cli-exit = []
+# Exposes `MockPathInfoStore` (in-memory fake) for dependents' tests.
+test-support = []
 
 [lib]
 name = "nixstore"

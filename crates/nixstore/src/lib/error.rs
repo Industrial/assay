@@ -9,9 +9,9 @@ pub enum InfraError {
   Io { path: String, message: String },
   #[error("sqlite error: {0}")]
   Sqlite(String),
-  #[error("database not found at {0}")]
+  #[error("database not found at {0} (point the store root at a Nix store, e.g. --store /nix)")]
   DbMissing(String),
-  #[error("unknown store path: {0}")]
+  #[error("unknown store path: {0} (not registered in the store database)")]
   UnknownPath(String),
   #[error("invalid hash in database: {0}")]
   InvalidHash(String),

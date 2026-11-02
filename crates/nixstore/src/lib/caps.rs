@@ -1,127 +1,174 @@
-//! Capability keys and providers for nixstore DI 3.0.
+//! The `PathInfoStore` capability: trait, newtype, environment alias and live layer.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 
-use id_effect::{Cap, Env, caps, mock_capability, provide};
+use id_effect::{Effect, Layer, caps, fail, hlist, succeed, suspend, sync};
 use rusqlite::Connection;
 
 use crate::db::{open_store_db, query_path_info};
 use crate::error::InfraError;
 use crate::model::{PathInfo, QueryOpts};
 
-/// Read path-info for store paths.
+/// Read path-info for store paths. Methods return effects that need nothing (`R = HNil`).
 pub trait PathInfoStore: Send + Sync {
-  fn query(&self, path: &str, opts: QueryOpts) -> Result<PathInfo, InfraError>;
+  fn query(&self, path: &str, opts: QueryOpts) -> Effect<PathInfo, InfraError>;
 }
 
-/// Sqlite-backed store; opens DB under `store_root` on each query (RO URI).
-#[derive(Debug, Clone)]
+/// The capability effects ask for (`~PathInfoService` / `need::<PathInfoService>()`).
+#[derive(Clone)]
+pub struct PathInfoService(pub Arc<dyn PathInfoStore>);
+
+/// Everything nixstore commands need.
+pub type NixstoreEnv = caps!(PathInfoService);
+
+/// Lifts a finished `Result` into an effect.
+fn from_result<A, E, R>(result: Result<A, E>) -> Effect<A, E, R> {
+  match result {
+    Ok(a) => succeed(a),
+    Err(e) => fail(e),
+  }
+}
+
+/// Sqlite-backed store over one read-only connection to `{store_root}/var/nix/db/db.sqlite`.
+///
+/// `rusqlite::Connection` is `Send` but `!Sync`, so it sits behind a `Mutex`; queries are short
+/// point lookups and run serially on the fiber's thread. `None` once [`close`](Self::close)d.
+#[derive(Debug)]
 pub struct SqlitePathInfoStore {
-  pub store_root: PathBuf,
+  conn: Arc<Mutex<Option<Connection>>>,
 }
 
 impl SqlitePathInfoStore {
-  pub fn new(store_root: impl Into<PathBuf>) -> Self {
-    Self {
-      store_root: store_root.into(),
-    }
+  /// Open the store DB under `store_root` read-only (fails with `DbMissing` / `Sqlite`).
+  pub fn open(store_root: &Path) -> Result<Self, InfraError> {
+    Ok(Self {
+      conn: Arc::new(Mutex::new(Some(open_store_db(store_root)?))),
+    })
   }
 
-  pub fn from_default() -> Self {
-    Self::new(crate::db::DEFAULT_STORE_ROOT)
-  }
-
-  fn conn(&self) -> Result<Connection, InfraError> {
-    open_store_db(&self.store_root)
+  /// Close the connection; later queries fail with `InfraError::Sqlite`.
+  pub fn close(&self) {
+    let conn = self
+      .conn
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .take();
+    drop(conn);
   }
 }
 
 impl PathInfoStore for SqlitePathInfoStore {
-  fn query(&self, path: &str, opts: QueryOpts) -> Result<PathInfo, InfraError> {
-    let conn = self.conn()?;
-    query_path_info(&conn, path, opts)
+  fn query(&self, path: &str, opts: QueryOpts) -> Effect<PathInfo, InfraError> {
+    let conn = Arc::clone(&self.conn);
+    let path = path.to_owned();
+    suspend(move || {
+      let guard = conn.lock().unwrap_or_else(PoisonError::into_inner);
+      from_result(match guard.as_ref() {
+        Some(c) => query_path_info(c, &path, opts),
+        None => Err(InfraError::Sqlite("store connection is closed".into())),
+      })
+    })
   }
 }
 
-/// In-memory path-info for tests.
-#[derive(Default)]
-pub struct MockPathInfoStore {
-  pub paths: Mutex<HashMap<String, PathInfo>>,
+/// The live layer: opens the sqlite connection once per build and closes it when the layer's
+/// scope closes (after the program, however it ends). `E` is the error of the graph it joins.
+pub fn layer<E>(store_root: impl Into<PathBuf>) -> Layer<NixstoreEnv, E>
+where
+  E: From<InfraError> + Send + 'static,
+{
+  let store_root = store_root.into();
+  Layer::scoped(move |scope| {
+    let store_root = store_root.clone();
+    suspend(move || from_result(SqlitePathInfoStore::open(&store_root).map(Arc::new)))
+      .map_err(E::from)
+      .flat_map(move |store: Arc<SqlitePathInfoStore>| {
+        let held = Arc::clone(&store);
+        scope
+          .add_finalizer(sync(move || held.close()))
+          .map(move |()| hlist![PathInfoService(store)])
+      })
+      // Open + register is one step, as in `Layer::acquire_release`.
+      .uninterruptible()
+  })
 }
 
-impl MockPathInfoStore {
-  pub fn set(&self, info: PathInfo) {
-    self.paths.lock().unwrap().insert(info.path.clone(), info);
+#[cfg(any(test, feature = "test-support"))]
+mod fake {
+  use std::collections::HashMap;
+  use std::sync::{Arc, Mutex, PoisonError};
+
+  use id_effect::{Effect, suspend};
+
+  use super::{PathInfoStore, from_result};
+  use crate::error::InfraError;
+  use crate::model::{PathInfo, QueryOpts};
+
+  /// In-memory path-info (tests; `test-support` feature).
+  #[derive(Default)]
+  pub struct MockPathInfoStore {
+    paths: Arc<Mutex<HashMap<String, PathInfo>>>,
   }
-}
 
-impl PathInfoStore for MockPathInfoStore {
-  fn query(&self, path: &str, opts: QueryOpts) -> Result<PathInfo, InfraError> {
-    let mut info = self
-      .paths
-      .lock()
-      .unwrap()
-      .get(path)
-      .cloned()
-      .ok_or_else(|| InfraError::UnknownPath(path.into()))?;
-    if !opts.include_referrers {
-      info.referrers = None;
+  impl MockPathInfoStore {
+    pub fn set(&self, info: PathInfo) {
+      self
+        .paths
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(info.path.clone(), info);
     }
-    if !opts.include_closure_size {
-      info.closure_size = None;
+  }
+
+  impl PathInfoStore for MockPathInfoStore {
+    fn query(&self, path: &str, opts: QueryOpts) -> Effect<PathInfo, InfraError> {
+      let paths = Arc::clone(&self.paths);
+      let path = path.to_owned();
+      suspend(move || {
+        let found = paths
+          .lock()
+          .unwrap_or_else(PoisonError::into_inner)
+          .get(&path)
+          .cloned();
+        from_result(
+          found
+            .map(|mut info| {
+              if !opts.include_referrers {
+                info.referrers = None;
+              }
+              if !opts.include_closure_size {
+                info.closure_size = None;
+              }
+              info
+            })
+            .ok_or(InfraError::UnknownPath(path)),
+        )
+      })
     }
-    Ok(info)
   }
 }
 
-pub type PathInfoStoreKey = Arc<dyn PathInfoStore>;
-
-pub type NixstoreEnv = caps!(PathInfoStoreKey);
-
-#[derive(::id_effect::ProviderSpecDerive)]
-#[provides(PathInfoStoreKey)]
-pub struct SqlitePathInfoStoreLive;
-
-impl SqlitePathInfoStoreLive {
-  #[allow(clippy::new_ret_no_self)] // ProviderSpecDerive factory returns capability key
-  fn new() -> PathInfoStoreKey {
-    Arc::new(SqlitePathInfoStore::from_default())
-  }
-}
-
-mock_capability!(
-  MockPathInfoStoreLive,
-  PathInfoStoreKey,
-  "pathinfo/mock",
-  || Arc::new(MockPathInfoStore::default()) as PathInfoStoreKey
-);
-
-pub fn live_providers() -> [id_effect::ProviderBox; 1] {
-  [provide!(SqlitePathInfoStoreLive)]
-}
-
-/// Providers with a custom store root (CLI `--store`, fixtures).
-pub fn providers_for_store(store_root: impl Into<PathBuf>) -> Env {
-  let mut env = Env::new();
-  let store: PathInfoStoreKey = Arc::new(SqlitePathInfoStore::new(store_root));
-  env.insert::<Cap<PathInfoStoreKey>>(store);
-  env
-}
-
-#[cfg(test)]
-pub fn mock_providers() -> [id_effect::ProviderBox; 1] {
-  [provide!(MockPathInfoStoreLive)]
-}
+#[cfg(any(test, feature = "test-support"))]
+pub use fake::MockPathInfoStore;
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use id_effect::{Effect, Exit, FromEnv, Needs, build_env, run_test};
+  use id_effect::{assert_exit_fail, expect_exit_failure, expect_exit_success, need, run_test};
+
+  const A: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a";
+
+  fn fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/minimal")
+  }
+
+  fn query_a() -> Effect<PathInfo, InfraError, NixstoreEnv> {
+    need::<PathInfoService>().flat_map(|s| s.0.query(A, QueryOpts::default()).narrow())
+  }
 
   #[test]
-  fn mock_query() {
+  fn mock_query_drops_unrequested_fields() {
     let mock = MockPathInfoStore::default();
     mock.set(PathInfo {
       path: "/nix/store/x".into(),
@@ -136,31 +183,42 @@ mod tests {
       referrers: Some(vec!["/nix/store/y".into()]),
       closure_size: Some(1),
     });
-    let info = mock.query("/nix/store/x", QueryOpts::default()).expect("q");
+    let info = expect_exit_success(run_test(mock.query("/nix/store/x", QueryOpts::default())));
     assert!(info.referrers.is_none());
     assert!(info.closure_size.is_none());
   }
 
   #[test]
-  fn build_env_materializes_mock_caps() {
-    let env = build_env(mock_providers()).expect("env");
-    assert!(env.has::<Cap<PathInfoStoreKey>>());
+  fn mock_unknown_path_fails() {
+    let mock = MockPathInfoStore::default();
+    assert_exit_fail(
+      &run_test(mock.query("/nix/store/x", QueryOpts::default())),
+      &InfraError::UnknownPath("/nix/store/x".into()),
+    );
   }
 
   #[test]
-  fn run_test_reads_caps() {
-    let env = NixstoreEnv::from_env(build_env(mock_providers()).expect("env"));
-    let effect: Effect<bool, (), NixstoreEnv> = Effect::new(|env| {
-      let _ = Needs::<PathInfoStoreKey>::need(env);
-      Ok(true)
-    });
-    assert_eq!(run_test(effect, env), Exit::Success(true));
+  fn layer_provides_sqlite_store() {
+    let info = expect_exit_success(run_test(
+      query_a().provide_layer(layer::<InfraError>(fixture_root())),
+    ));
+    assert_eq!(info.nar_size, 100);
   }
 
   #[test]
-  fn providers_for_store_inserts_cap() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/minimal");
-    let env = providers_for_store(&root);
-    assert!(env.has::<Cap<PathInfoStoreKey>>());
+  fn layer_fails_when_db_missing() {
+    let exit = run_test(query_a().provide_layer(layer::<InfraError>("/nonexistent")));
+    assert_exit_fail(
+      &exit,
+      &InfraError::DbMissing("/nonexistent/var/nix/db/db.sqlite".into()),
+    );
+  }
+
+  #[test]
+  fn closed_store_fails_queries() {
+    let store = SqlitePathInfoStore::open(&fixture_root()).expect("open fixture");
+    store.close();
+    let exit = run_test(store.query(A, QueryOpts::default()));
+    assert!(matches!(expect_exit_failure(exit), InfraError::Sqlite(_)));
   }
 }

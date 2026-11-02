@@ -6,11 +6,10 @@ pub mod db;
 pub mod error;
 pub mod model;
 
-pub use caps::{
-  MockPathInfoStore, NixstoreEnv, PathInfoStore, PathInfoStoreKey, SqlitePathInfoStore,
-  live_providers, providers_for_store,
-};
-pub use commands::{PathInfoFlags, cmd_path_info, resolve_store_root};
+#[cfg(any(test, feature = "test-support"))]
+pub use caps::MockPathInfoStore;
+pub use caps::{NixstoreEnv, PathInfoService, PathInfoStore, SqlitePathInfoStore, layer};
+pub use commands::{PathInfoFlags, PathInfoReport, path_info, resolve_store_root};
 pub use db::{DEFAULT_STORE_ROOT, db_path_for_store, open_db, open_store_db, query_path_info};
 pub use error::InfraError;
 pub use model::{PathInfo, QueryOpts, db_hash_to_sri, human_bytes};
@@ -27,7 +26,6 @@ mod id_effect_dep_smoke {
     assert!(matches!(exit, Exit::Success(())));
   }
 
-  #[cfg(feature = "cli-exit")]
   #[test]
   fn id_effect_cli_exit_code_linked() {
     use id_effect_cli::exit_code_for_exit;
