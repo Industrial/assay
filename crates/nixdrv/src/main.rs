@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use id_effect::{Effect, HNil};
+use id_effect::{Effect, HNil, fail};
 use id_effect_cli::{RunMainConfig, run_main};
 
 use nixdrv::caps::layer;
@@ -16,7 +16,7 @@ use nixdrv::commands::{
   store_path_make_fixed, store_path_parse,
 };
 use nixdrv::error::InfraError;
-use nixstore::edge::{CliError, from_result, print_line};
+use nixstore::edge::{CliError, print_line};
 
 #[derive(Parser)]
 #[command(
@@ -95,8 +95,10 @@ fn run<A: Send + 'static>(
   render: fn(&A) -> Result<String, InfraError>,
 ) -> ExitCode {
   let program = command
-    .flat_map(move |out| from_result(render(&out)))
-    .flat_map(|text| print_line::<nixq::InfraError>(text).map_err(InfraError::from))
+    .flat_map(move |out| match render(&out) {
+      Ok(text) => print_line::<nixq::InfraError>(text).map_err(InfraError::from),
+      Err(e) => fail(e),
+    })
     .map_err(CliError);
   run_main(program, HNil, RunMainConfig::minimal())
 }

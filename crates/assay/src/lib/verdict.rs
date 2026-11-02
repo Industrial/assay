@@ -75,7 +75,7 @@ impl InfraError {
 }
 
 /// [`outcome_to_exit`] as an effect: verdicts succeed, infra errors fail, defects die.
-pub fn outcome_to_effect(outcome: AssayOutcome) -> Effect<CaseVerdict, InfraError> {
+pub fn outcome_verdict(outcome: AssayOutcome) -> Effect<CaseVerdict, InfraError> {
   match outcome_to_exit(outcome) {
     Exit::Success(verdict) => succeed(verdict),
     Exit::Failure(Cause::Fail(e)) => fail(e),
@@ -237,6 +237,8 @@ impl InfraError {
 }
 
 #[cfg(test)]
+// Tests check the serde round-trip of the wire types.
+#[cfg_attr(dylint_lib = "id_effect_lints", allow(schema_parsing_at_io_boundary))]
 mod tests {
   use super::*;
   use id_effect::failure::pretty_exit;

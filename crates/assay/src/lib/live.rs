@@ -10,6 +10,18 @@
 //! `tokio::process` has its runtime. Interrupting the effect (a case timeout, Ctrl-C) drops the
 //! future inside the task, which kills the `nix` child (`kill_on_drop`).
 
+// id_effect_lints: this is the I/O boundary. Its async helpers run only inside `on_executor`
+// tasks; `settle` / `on_executor` / `blocking` pass any `E` through unchanged (no `From` to
+// apply); the statics are temp-name counters, not services.
+#![cfg_attr(
+  dylint_lib = "id_effect_lints",
+  allow(
+    no_async_fn_in_effect_crate,
+    effect_error_bound_must_use_from,
+    no_static_service_globals
+  )
+)]
+
 use std::future::{Future, poll_fn};
 use std::path::{Path, PathBuf};
 use std::pin::{Pin, pin};

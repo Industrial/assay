@@ -1,5 +1,13 @@
 //! nixq — JSON/attrpath query (pure value algebra + Effect I/O).
 
+// id_effect_lints: `effect!`'s `~` binds lower to `.await`, which `no_await_outside_from_async`
+// flags (a false positive); the pure value algebra returns `Result` by design and is lifted
+// into `Effect` where a capability is involved.
+#![cfg_attr(
+  dylint_lib = "id_effect_lints",
+  allow(no_await_outside_from_async, no_result_return_in_pub_fn)
+)]
+
 pub mod caps;
 pub mod commands;
 pub mod diff;

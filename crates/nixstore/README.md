@@ -2,13 +2,14 @@
 
 Read-only Nix store **path-info** over `db.sqlite` (tier 3 of the Nix→Rust ladder).
 
-**Doctrine:** query `ValidPaths` / `Refs` via DI 3.0 `PathInfoStore` cap + `effect!`; never shell out to `nix`; never write the DB.
+**Doctrine:** query `ValidPaths` / `Refs` via the `PathInfoStore` capability (`PathInfoService`, `NixstoreEnv = caps!(PathInfoService)`, `layer(store_root)` opens the connection once) + `effect!`; never shell out to `nix`; never write the DB. `path_info` returns a typed `PathInfoReport` rendered at the edge; CLI = `id_effect_cli::run_main`.
 
 ## Library
 
 - `open_db` / `SqlitePathInfoStore` — SQLite URI `mode=ro`
 - `PathInfo` — v1-shaped JSON fields (`narHash` SRI, full paths, `references`)
-- `PathInfoStore` cap + `MockPathInfoStore` for assay / unit tests
+- `PathInfoStore` trait (methods return `Effect`) + `MockPathInfoStore` (only under `cfg(test)` / the `test-support` feature)
+- `edge` — the exit wrappers (`run_main_coded`, `run_main_coded_by`) shared by every bin in the workspace
 - Closure size via BFS over references
 
 Assay (`pathInfo` claim) and nixq (`path-info` subcommand) depend on this crate.
@@ -23,6 +24,8 @@ nixstore path-info [--json] [-s|--size] [-S|--closure-size] [-h|--human-readable
 ```
 
 Default DB: `{store}/var/nix/db/db.sqlite` with `store` defaulting to `/nix`.
+
+Exit: `0` ok, `1` typed failure (unknown path, missing DB), `2` usage error, `101` defect, `130` Ctrl-C.
 
 ## Packaging (v1)
 

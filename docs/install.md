@@ -24,6 +24,9 @@ cargo install nix-assay --locked
 assay run path/to/suite.assay.nix
 ```
 
+Building from source needs Rust **1.94** or newer (the workspace `rust-version`; id_effect 0.13's
+MSRV).
+
 ### GitHub release binary
 
 Download the asset for your platform from

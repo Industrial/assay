@@ -25,8 +25,15 @@ pub fn run_law_by_name(name: &str, seed: u64) -> AssayOutcome {
   }
 }
 
+/// The merge a law checks: [`merge_maps`] at run time; tests pass a broken one.
+type Merge = fn(&Map<String, Value>, &Map<String, Value>) -> Map<String, Value>;
+
 /// `a ∪ {} == a` and `{} ∪ a == a` for object maps.
 pub fn law_merge_identity(seed: u64) -> AssayOutcome {
+  merge_identity_with(seed, merge_maps)
+}
+
+fn merge_identity_with(seed: u64, merge_maps: Merge) -> AssayOutcome {
   prop_assert(seed, LAW_TRIALS, |rng| {
     let left = rng_object(rng);
     let empty = empty_object();
@@ -41,6 +48,10 @@ pub fn law_merge_identity(seed: u64) -> AssayOutcome {
 
 /// `(a ∪ b) ∪ c == a ∪ (b ∪ c)` for object maps.
 pub fn law_merge_associativity(seed: u64) -> AssayOutcome {
+  merge_associativity_with(seed, merge_maps)
+}
+
+fn merge_associativity_with(seed: u64, merge_maps: Merge) -> AssayOutcome {
   prop_assert(seed, LAW_TRIALS, |rng| {
     let a = rng_object(rng);
     let b = rng_object(rng);
@@ -61,6 +72,10 @@ pub fn law_merge_associativity(seed: u64) -> AssayOutcome {
 
 /// `a ∪ a == a` for object maps.
 pub fn law_merge_idempotent(seed: u64) -> AssayOutcome {
+  merge_idempotent_with(seed, merge_maps)
+}
+
+fn merge_idempotent_with(seed: u64, merge_maps: Merge) -> AssayOutcome {
   prop_assert(seed, LAW_TRIALS, |rng| {
     let map = rng_object(rng);
     let merged = merge_maps(&map, &map);
@@ -96,19 +111,7 @@ fn empty_object() -> Map<String, Value> {
   Map::new()
 }
 
-#[cfg(test)]
-thread_local! {
-    static FORCE_BAD_MERGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 fn merge_maps(left: &Map<String, Value>, right: &Map<String, Value>) -> Map<String, Value> {
-  #[cfg(test)]
-  if FORCE_BAD_MERGE.with(|flag| flag.get()) {
-    if left == right {
-      return Map::new();
-    }
-    return right.clone();
-  }
   let mut merged = left.clone();
   for (key, value) in right {
     merged.insert(key.clone(), value.clone());
@@ -117,26 +120,17 @@ fn merge_maps(left: &Map<String, Value>, right: &Map<String, Value>) -> Map<Stri
 }
 
 #[cfg(test)]
-struct BadMergeGuard;
-
-#[cfg(test)]
-impl BadMergeGuard {
-  fn new() -> Self {
-    FORCE_BAD_MERGE.with(|flag| flag.set(true));
-    Self
-  }
-}
-
-#[cfg(test)]
-impl Drop for BadMergeGuard {
-  fn drop(&mut self) {
-    FORCE_BAD_MERGE.with(|flag| flag.set(false));
-  }
-}
-
-#[cfg(test)]
 mod tests {
   use super::*;
+
+  /// A merge that breaks every law: `{}` for equal inputs, else the right side.
+  fn bad_merge(left: &Map<String, Value>, right: &Map<String, Value>) -> Map<String, Value> {
+    if left == right {
+      Map::new()
+    } else {
+      right.clone()
+    }
+  }
 
   #[test]
   fn merge_identity_holds_for_seed() {
@@ -179,13 +173,12 @@ mod tests {
   }
 
   #[test]
-  fn bad_merge_hook_exercises_both_branches() {
-    let _guard = BadMergeGuard::new();
+  fn bad_merge_exercises_both_branches() {
     let mut a = Map::new();
     a.insert("x".into(), Value::Number(1.into()));
     let empty = Map::new();
-    assert_eq!(merge_maps(&a, &empty), empty);
-    assert_eq!(merge_maps(&a, &a), Map::new());
+    assert_eq!(bad_merge(&a, &empty), empty);
+    assert_eq!(bad_merge(&a, &a), Map::new());
   }
 
   #[test]
@@ -208,16 +201,15 @@ mod tests {
 
   #[test]
   fn law_failure_branches_emit_counterexamples() {
-    let _guard = BadMergeGuard::new();
-    match law_merge_identity(1) {
+    match merge_identity_with(1, bad_merge) {
       AssayOutcome::Counterexample { .. } => {}
       other => panic!("expected counterexample, got {other:?}"),
     }
-    match law_merge_associativity(2) {
+    match merge_associativity_with(2, bad_merge) {
       AssayOutcome::Counterexample { .. } => {}
       other => panic!("expected counterexample, got {other:?}"),
     }
-    match law_merge_idempotent(3) {
+    match merge_idempotent_with(3, bad_merge) {
       AssayOutcome::Counterexample { .. } => {}
       other => panic!("expected counterexample, got {other:?}"),
     }

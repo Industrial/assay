@@ -5,6 +5,13 @@
 //! fetches are retried and bounded by timeouts ([`resilience`]).
 
 #![forbid(unsafe_code)]
+// id_effect_lints: `effect!`'s `~` binds lower to `.await`, which `no_await_outside_from_async`
+// flags (a false positive; real futures only run in `live`); pure hash / NAR / parse helpers
+// return `Result` by design and are lifted into `Effect` where a capability is involved.
+#![cfg_attr(
+  dylint_lib = "id_effect_lints",
+  allow(no_await_outside_from_async, no_result_return_in_pub_fn)
+)]
 
 pub mod caps;
 pub mod commands;

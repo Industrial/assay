@@ -6,6 +6,13 @@
 //! edge ([`report`]). Suites decode through derived schemas ([`schema`]).
 
 #![forbid(unsafe_code)]
+// id_effect_lints: `effect!`'s `~` binds lower to `.await`, which `no_await_outside_from_async`
+// flags (a false positive; real futures only run in `live`); pure parsers and value algebra
+// return `Result` by design and are lifted into `Effect` where a capability is involved.
+#![cfg_attr(
+  dylint_lib = "id_effect_lints",
+  allow(no_await_outside_from_async, no_result_return_in_pub_fn)
+)]
 
 pub mod assay_suite;
 pub mod batch;

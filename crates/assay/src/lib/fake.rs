@@ -5,6 +5,13 @@
 //! call is made, so a retried effect asks the script again per attempt. [`MemFs`] is an
 //! in-memory [`Fs`].
 
+// id_effect_lints: test fakes keep their scripted / in-memory state behind a `Mutex` (shared
+// with the effects they hand out, not fiber coordination); `SNAP_SEQ` is a temp-name counter.
+#![cfg_attr(
+  dylint_lib = "id_effect_lints",
+  allow(no_mutex_for_fiber_coordination, no_static_service_globals)
+)]
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,15 +50,15 @@ pub trait SyncEval: Send + Sync {
 
 impl<T: SyncEval + ?Sized> NixEval for T {
   fn eval_expr(&self, expr: &str) -> Effect<Value, AssayOutcome> {
-    self.eval_json(expr).into_effect()
+    self.eval_json(expr).lift()
   }
 
   fn eval_file(&self, path: &Path) -> Effect<Value, AssayOutcome> {
-    self.eval_file_json(path).into_effect()
+    self.eval_file_json(path).lift()
   }
 
   fn eval_source(&self, source: &str) -> Effect<Value, AssayOutcome> {
-    self.eval_source_json(source).into_effect()
+    self.eval_source_json(source).lift()
   }
 }
 

@@ -72,6 +72,8 @@ pub(crate) fn nix_eval_failed(outcome: AssayOutcome) -> InfraError {
 }
 
 #[cfg(test)]
+// Tests parse JSON fixtures directly; production decoding goes through `Schema`.
+#[cfg_attr(dylint_lib = "id_effect_lints", allow(schema_parsing_at_io_boundary))]
 mod tests {
   use id_effect::{expect_exit_failure, expect_exit_success, run_test};
   use serde_json::json;

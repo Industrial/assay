@@ -14,6 +14,18 @@
 //! - blocking `std::fs` calls run on the executor's blocking pool ([`blocking`]), so they never
 //!   park an executor thread. On a `TestExecutor` they run as an ordinary task.
 
+// id_effect_lints: this is the I/O boundary. Its async helpers run only inside `on_executor`
+// tasks; `settle` / `on_executor` / `blocking` pass any `E` through unchanged (no `From` to
+// apply); `TEMP_SEQ` is a temp-name counter, not a service.
+#![cfg_attr(
+  dylint_lib = "id_effect_lints",
+  allow(
+    no_async_fn_in_effect_crate,
+    effect_error_bound_must_use_from,
+    no_static_service_globals
+  )
+)]
+
 use std::collections::BTreeMap;
 use std::error::Error as _;
 use std::ffi::OsStr;
@@ -345,6 +357,8 @@ mod tests {
   }
 
   /// Serves one canned response per connection, `responses.len()` connections, then stops.
+  // A blocking test HTTP server on its own thread, outside any effect.
+  #[cfg_attr(dylint_lib = "id_effect_lints", allow(no_thread_spawn))]
   fn serve(responses: Vec<Vec<u8>>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");

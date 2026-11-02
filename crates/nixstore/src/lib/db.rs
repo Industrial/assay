@@ -196,6 +196,8 @@ pub fn query_path_info(
 }
 
 #[cfg(test)]
+// Tests compare against JSON goldens.
+#[cfg_attr(dylint_lib = "id_effect_lints", allow(schema_parsing_at_io_boundary))]
 mod tests {
   use super::*;
 

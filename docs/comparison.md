@@ -63,4 +63,4 @@ Fifty-eq fixture shape: `let assay = import …/nix/assay/default.nix; in assay.
 
 1. **Not in nixpkgs** — packaging / flake app is the packaging gap, not semantics.
 2. **Microbench** — still ~1.8× nix-unit on 50 trivial eqs (subprocess `nix eval` vs in-process C API). Closing further needs an optional in-process eval backend, not more batching.
-3. **id_effect pin** — latency fix requires id_effect `ComputeSupervisor` lazy telemetry (path dep). Assay `StdClock` is in-tree regardless.
+3. **id_effect pin** — resolved: the lazy `SysinfoTelemetry` latency fix ships in the crates.io release, and every crate depends on id_effect 0.13.0 from crates.io (no path or git dep). Time comes from the id_effect executor (`StdClock` is gone).

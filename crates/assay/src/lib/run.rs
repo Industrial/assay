@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use id_effect::{Concurrency, Effect, Exit, Schedule, for_each_par, need};
+use id_effect::{Concurrency, Effect, Exit, Schedule, effect, for_each_par, need};
 use serde::Serialize;
 
 use crate::assay_suite::load_assay_suite;
@@ -20,7 +20,7 @@ use crate::batch::{partition_cases, run_batch};
 use crate::caps::{AssayEnv, FsService, NixEvalService, SuiteEnv};
 use crate::claims::{Claim, ClaimCaps, claim_caps, interpret_with};
 use crate::compat::load_compat_suite;
-use crate::discover::{SuiteKind, discover_suites, suite_kind};
+use crate::discover::{SuiteFile, SuiteKind, discover_suites, suite_kind};
 use crate::eval::NixEval;
 use crate::files::{EntryKind, Fs};
 use crate::outcome::AssayOutcome;
@@ -187,24 +187,21 @@ pub fn run_discovered_with(
 ) -> Effect<SuiteReport, InfraError> {
   let jobs = Concurrency::Bounded(opts.jobs.max(1));
   let (eval, fs) = (Arc::clone(&caps.eval), Arc::clone(&caps.fs));
-  discover_suites(&caps.fs, &root)
-    .flat_map(move |suites| {
-      for_each_par(
-        suites,
-        move |suite| {
-          let prefix = suite.path.display().to_string();
-          load_suite_cases(&eval, &fs, &suite.path).map(move |cases| {
-            cases
-              .into_iter()
-              .map(|(name, claim)| (format!("{prefix}::{name}"), claim))
-              .collect::<Vec<_>>()
-          })
-        },
-        jobs,
-      )
-    })
-    .flat_map(move |loaded| run_cases(loaded.into_iter().flatten().collect(), caps, opts))
-    .map(|outcomes| SuiteReport { outcomes })
+  effect!({
+    let suites = ~discover_suites(&caps.fs, &root);
+    let load = move |suite: SuiteFile| {
+      let prefix = suite.path.display().to_string();
+      load_suite_cases(&eval, &fs, &suite.path).map(move |cases| {
+        cases
+          .into_iter()
+          .map(|(name, claim)| (format!("{prefix}::{name}"), claim))
+          .collect::<Vec<_>>()
+      })
+    };
+    let loaded = ~for_each_par(suites, load, jobs);
+    let outcomes = ~run_cases(loaded.into_iter().flatten().collect(), caps, opts);
+    SuiteReport { outcomes }
+  })
 }
 
 /// [`load_suite_cases`] with the capabilities from [`SuiteEnv`].

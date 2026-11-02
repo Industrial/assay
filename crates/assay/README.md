@@ -37,56 +37,46 @@ Nix suites (nix/assay)  →  assay run  →  Rust runner (id_effect)
 
 ## id_effect runner
 
-**Doctrine:** library code returns `Effect`; capabilities are the only I/O; cases run as fibers; soft assertion results are `CaseVerdict` in `Exit::Success`; infra is `Fail(InfraError)`; panics/leaks are `Die`. The CLI is a thin `run_with` edge.
-
-Skill router (start here): [.cursor/skills/rust/id_effect/SKILL.md](../../../.cursor/skills/rust/id_effect/SKILL.md).
+**Doctrine:** library code returns `Effect` (id_effect 0.13); capabilities are the only I/O; soft assertion results are `CaseVerdict` in `Exit::Success`; infra is `Fail(InfraError)`; panics are `Die`. The CLI is a thin `id_effect_cli::run_main` edge (via `nixstore::edge::run_main_coded_by`).
 
 ### Core signatures
-
-Target (wave 2+ — capability-injected interpreter and orchestrator):
 
 ```rust
 use id_effect::Effect;
 
-// Claim interpreter — uses ~NixEvaluator / ~SnapshotStore inside effect!
-fn interpret_claim(claim: &Claim) -> Effect<CaseVerdict, InfraError, AssayEnv>;
+// Claim interpreter — reaches nix / snapshots / the store only through AssayEnv.
+pub fn interpret_claim(claim: Claim) -> Effect<CaseVerdict, InfraError, AssayEnv>;
 
-// Suite orchestrator — discover, run cases, aggregate report
-fn run_suite(path: &Path, opts: &RunOptions) -> Effect<SuiteReport, InfraError, AssayEnv>;
+// Suite orchestrator — load a suite, run its cases, build the typed report.
+pub fn run_suite(path: &Path, opts: &RunOptions) -> Effect<SuiteReport, InfraError, AssayEnv>;
 ```
 
-Current v0 sync API (migration shim; `eval` passed explicitly until wave 2 lands):
+`run_path` dispatches a file or a directory; `render_report` turns a `SuiteReport` into
+human / JSON / TAP text at the edge. `normalize` / `diff` stay pure value morphisms.
 
-```rust
-pub fn interpret_claim(claim: &Claim, eval: &dyn EvalBackend) -> AssayOutcome;
-pub fn run_suite(path: &Path, opts: &RunOptions) -> Vec<(String, AssayOutcome)>;
-```
+Cases run with `for_each_par(Concurrency::Bounded(n))` (`n` = available parallelism, fallback 4);
+`--case-timeout-ms` is `timeout_fail` from the moment the case starts; `--retry-flaky-eval` is a
+bounded `Effect::retry` (1 ms spacing, 2 retries) for I/O failures only.
 
-`normalize` / `diff` stay pure value morphisms — no `Effect` wrapper (decision D6).
+### Capabilities
 
-### Capability providers
+Each capability is a trait whose methods return `Effect`, behind a service newtype in an
+`*Env = caps!(…)` environment — never globals. Live adapters live in `src/lib/live.rs`.
 
-Injected via `Caps` / `AssayEnv = caps!(…)` — never globals.
+| Capability | Service (`caps.rs`) | Role | Live adapter |
+|------------|---------------------|------|--------------|
+| Nix evaluator | `NixEvalService` (`NixEval`) | suite / compat load, batch and per-claim eval | `LiveNixEval` (`nix eval` via `tokio::process`, killed on interrupt — see [SPIKE.md](SPIKE.md)) |
+| Snapshot store | `SnapshotService` | golden read/write under `testdata/goldens/` | `SnapshotStore` over `Fs` |
+| Store path-info | `nixstore::PathInfoService` | `pathInfo` claims | `LazyPathInfoStore` (opens `db.sqlite` on the first query) |
+| Filesystem | `FsService` (`Fs`) | suite reads, discovery, snapshots | `LiveFs` (`std::fs` on the executor's blocking pool) |
 
-| Capability | Marker (`caps.rs`) | Role | Live provider (v1) |
-|------------|-------------------|------|---------------------|
-| Nix evaluator | `NixEvaluator` | `eval_json` for claim expressions | `ProcessNixEval` (`nix eval` subprocess — see [SPIKE.md](SPIKE.md)) |
-| Snapshot store | `SnapshotStore` | Golden read/write under `testdata/goldens/` | Filesystem-backed store |
-| Clock | `TestClock` | Timeouts, fiber races, deterministic tests | `LiveClock` at CLI edge; `TestClock` in unit tests |
+Per-claim environments: `EvalEnv`, `SnapshotEnv`, `PathInfoEnv`, `FsEnv`, `SuiteEnv`; a run
+needs `AssayEnv`. Time comes from the id_effect executor, so timeout and retry tests run on
+`TestExecutor` virtual time.
 
-Optional: `FakeStore` (sandbox / IFD module tests) and `NixWorkerPool` (bounded concurrency) are planned behind separate capability keys.
-
-Unit tests use `mock_capability!` + `build_env` + `run_test` — see the id_effect testing chapter below.
-
-### id_effect book anchors
-
-Local book checkout (adjust if your `id_effect` path differs):
-
-| Topic | Chapter | Path |
-|-------|---------|------|
-| `Exit` / verdict vs `Cause` | ch08 — Exit | `/data/Code/rust/id_effect/crates/id_effect/book/src/part3/ch08-02-exit.md` |
-| Fibers, spawn, collect-all | ch09 — Concurrency | `/data/Code/rust/id_effect/crates/id_effect/book/src/part3/ch09-00-concurrency.md` |
-| `run_test`, mocks, TestClock | ch15 — Testing | `/data/Code/rust/id_effect/crates/id_effect/book/src/part4/ch15-00-testing.md` |
+In-memory fakes (`MockNixEval`, `SyncEval`, `MemFs`, `FakeStore`) are compiled only under
+`cfg(test)` or the `test-support` feature; tests use `run_test` / `assert_exit_*` and
+`testing::property` for the law / claim properties.
 
 ## CLI
 
@@ -100,6 +90,12 @@ Options (see `assay run --help`):
 - `--format human|json|tap` — report format (default: human)
 - `--json` — alias for `--format json` (backward compatible)
 - `--update-snapshots` — refresh golden files
+- `--case-timeout-ms <MS>` — per-case timeout, measured from the case's start
+- `--retry-flaky-eval` — retry I/O eval failures (2 retries)
+- `--no-batch` — one nix process per claim
+
+Exit codes: `0` all cases passed, `1` any non-pass or a suite-load error, `2` usage, `101`
+defect, `130` Ctrl-C — see [docs/cli.md](../../docs/cli.md#exit-codes).
 
 ### Report formats
 
@@ -109,9 +105,8 @@ Options (see `assay run --help`):
 | `json` | CI artifact / machine parsing |
 | `tap` | Test Anything Protocol consumers |
 
-Reporting uses `id_effect::Stream::from_iterable` over collected outcomes.
-**v1 backpressure:** outcomes are buffered entirely before formatted output is
-emitted (no live per-case streaming yet).
+The run builds a typed `SuiteReport`; the pure `render_report` formats it once every case has
+finished (no live per-case streaming).
 
 ## Writing tests
 
@@ -144,15 +139,13 @@ The runner maps `expr` / `expected` to internal `eq` claims. Fixtures live under
 ## Development
 
 ```bash
-cd rust && cargo test -p nix-assay
-cd rust && cargo clippy -p nix-assay --all-targets -- -D warnings
+devenv shell -- cargo test -p nix-assay
+devenv shell -- cargo clippy -p nix-assay --all-targets -- -D warnings
 ```
-
-Rust testing conventions for this workspace: [../TESTING.md](../TESTING.md).
 
 ## Status
 
-Wave 0 (`id_effect` deps) shipped. Waves 1–5 (caps, Effect interpreter, fibers, snapshots, schema/optics) are in flight. The Nix DSL in `nix/assay/` is stable as **data**; runner APIs may evolve until wave 6 regression gate is green.
+The runner is on id_effect 0.13 (MSRV 1.94); see [CHANGELOG.md](../../CHANGELOG.md). The Nix DSL in `nix/assay/` is stable as **data**.
 
 Evaluator backend: process-isolated `nix eval` is the v1 Live provider; the Nix C API remains **optional** (see [SPIKE.md](SPIKE.md)).
 

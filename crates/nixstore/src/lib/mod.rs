@@ -1,5 +1,13 @@
 //! nixstore — read-only Nix store path-info from db.sqlite.
 
+// id_effect_lints: `effect!`'s `~` binds lower to `.await`, which `no_await_outside_from_async`
+// flags (a false positive); DB / model helpers return `Result` by design and are lifted into
+// `Effect` by the `PathInfoStore` capability.
+#![cfg_attr(
+  dylint_lib = "id_effect_lints",
+  allow(no_await_outside_from_async, no_result_return_in_pub_fn)
+)]
+
 pub mod caps;
 pub mod commands;
 pub mod db;

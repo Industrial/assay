@@ -40,7 +40,8 @@
     enable = true;
     # Preserve this repo's Moon gate composition (not the shared ci-* defaults).
     preCommitTargets = ":format :check :lint :test";
-    prePushTargets = ":format :check :lint :build :test :audit :check-docs";
+    # :lint-effect (Dylint) runs on push and in CI only: its first run installs a nightly.
+    prePushTargets = ":format :check :lint :lint-effect :build :test :audit :check-docs";
   };
   cursor.features.git-hooks-prek.enable = true;
 
@@ -48,6 +49,9 @@
   env = {
     RUST_BACKTRACE = "1";
     RUSTC_WRAPPER = "sccache";
+    # rustup for `scripts/dylint.sh` (Dylint builds id_effect_lints on its pinned nightly).
+    # Not in `packages`: its cargo/rustc proxies would collide with the toolchain on PATH.
+    ASSAY_RUSTUP_BIN = "${pkgs.rustup}/bin";
   };
 
   # packages-rust-dev also ships nixpkgs rustc/clippy/rustfmt, which shadow the

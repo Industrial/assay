@@ -5,6 +5,10 @@
 //!   [`Reply::Hang`] sleeps on the executor clock (virtual on a `TestExecutor`) so attempt and
 //!   overall timeouts can be tested.
 
+// id_effect_lints: test fakes keep their scripted / in-memory state behind a `Mutex` (shared
+// with the effects they hand out, not fiber coordination).
+#![cfg_attr(dylint_lib = "id_effect_lints", allow(no_mutex_for_fiber_coordination))]
+
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

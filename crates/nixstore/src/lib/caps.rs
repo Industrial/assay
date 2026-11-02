@@ -28,6 +28,8 @@ pub type NixstoreEnv = caps!(PathInfoService);
 /// `rusqlite::Connection` is `Send` but `!Sync`, so it sits behind a `Mutex`; queries are short
 /// point lookups and run serially on the fiber's thread. `None` once [`close`](Self::close)d.
 #[derive(Debug)]
+// The `Mutex` makes the `!Sync` connection shareable (see above); it coordinates no fibers.
+#[cfg_attr(dylint_lib = "id_effect_lints", allow(no_mutex_for_fiber_coordination))]
 pub struct SqlitePathInfoStore {
   conn: Arc<Mutex<Option<Connection>>>,
 }
@@ -101,6 +103,8 @@ mod fake {
 
   /// In-memory path-info (tests; `test-support` feature).
   #[derive(Default)]
+  // A test fake's in-memory state, not fiber coordination.
+  #[cfg_attr(dylint_lib = "id_effect_lints", allow(no_mutex_for_fiber_coordination))]
   pub struct MockPathInfoStore {
     paths: Arc<Mutex<HashMap<String, PathInfo>>>,
   }

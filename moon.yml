@@ -94,6 +94,17 @@ tasks:
       - '**/*.rs'
     options:
       outputStyle: buffer-only-failure
+  lint-effect:
+    description: 'Run id_effect_lints (Dylint) over the workspace; any warning fails'
+    command: 'bash'
+    args: ['scripts/dylint.sh']
+    inputs:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '**/*.rs'
+      - 'scripts/dylint.sh'
+    options:
+      outputStyle: buffer-only-failure
   test:
     description: 'Run tests with nextest'
     command: 'cargo'

@@ -210,6 +210,8 @@ fn string_field_opt(map: &Map<String, Value>, key: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+// Tests parse JSON fixtures directly.
+#[cfg_attr(dylint_lib = "id_effect_lints", allow(schema_parsing_at_io_boundary))]
 mod tests {
   use super::*;
   use std::fs;

@@ -20,7 +20,7 @@ use crate::files::Fs;
 use crate::force::check_forces;
 use crate::outcome::AssayOutcome;
 use crate::snapshot::SnapshotStore;
-use crate::verdict::{CaseVerdict, InfraError, outcome_to_effect};
+use crate::verdict::{CaseVerdict, InfraError, outcome_verdict};
 use nixq::{normalize_value, structural_diff, value_contains_subset, value_has_attrs};
 
 /// A single test claim authored in Nix and interpreted by the runner.
@@ -144,7 +144,7 @@ pub fn snapshot_claim(name: String, expr: String) -> Effect<CaseVerdict, InfraEr
     need::<SnapshotService>().flat_map(move |snapshots: Arc<SnapshotService>| {
       need::<FsService>().flat_map(move |fs: Arc<FsService>| {
         interpret_snapshot(&eval.0, &fs.0, snapshots.0.clone(), name, &expr)
-          .flat_map(outcome_to_effect)
+          .flat_map(outcome_verdict)
           .any_env()
       })
     })
@@ -160,7 +160,7 @@ pub fn path_info_claim(
 ) -> Effect<CaseVerdict, InfraError, PathInfoEnv> {
   need::<PathInfoService>().flat_map(move |store: Arc<PathInfoService>| {
     interpret_path_info(&store.0, &path, expect, referrers, closure_size)
-      .flat_map(outcome_to_effect)
+      .flat_map(outcome_verdict)
       .any_env()
   })
 }
@@ -243,7 +243,7 @@ fn interpret_outcome(
       None => fail(missing_capability("pathInfo", "PathInfoService")),
     },
   };
-  outcome.flat_map(outcome_to_effect)
+  outcome.flat_map(outcome_verdict)
 }
 
 fn missing_capability(claim: &str, service: &str) -> InfraError {

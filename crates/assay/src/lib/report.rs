@@ -176,6 +176,8 @@ pub fn report_outcomes(
 }
 
 #[cfg(test)]
+// Tests parse the rendered JSON back to assert on it.
+#[cfg_attr(dylint_lib = "id_effect_lints", allow(schema_parsing_at_io_boundary))]
 mod tests {
 
   use super::*;

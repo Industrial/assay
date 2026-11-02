@@ -55,7 +55,8 @@ enum Commands {
     path: PathBuf,
   },
   Laws {
-    #[arg(long, default_value_t = 0)]
+    // A literal default: `default_value_t` expands to a `static` (no_static_service_globals).
+    #[arg(long, default_value = "0")]
     seed: u64,
     #[arg(long)]
     json: bool,
@@ -70,6 +71,8 @@ enum MainError {
   Infra(InfraError),
 }
 
+// `fmt` is a trait method: its `fmt::Result` is not ours to change.
+#[cfg_attr(dylint_lib = "id_effect_lints", allow(no_result_return_in_pub_fn))]
 impl fmt::Display for MainError {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
@@ -130,7 +133,7 @@ fn cmd_run(
 ) -> Effect<u8, MainError> {
   let report_format = match resolve_format(json, format.as_deref()) {
     Ok(f) => f,
-    Err(e) => return id_effect::fail(MainError::Usage(e)),
+    Err(e) => return id_effect::fail(e),
   };
   opts.json_output = report_format == ReportFormat::Json;
   let snapshots = SnapshotStore::new(default_snapshot_root()).with_update(opts.update_snapshots);
@@ -150,18 +153,23 @@ fn cmd_run(
     })
 }
 
-fn resolve_format(json: bool, format: Option<&str>) -> Result<ReportFormat, String> {
+fn resolve_format(json: bool, format: Option<&str>) -> Result<ReportFormat, MainError> {
+  let usage = MainError::Usage;
   match (json, format) {
     (true, Some(f)) => {
-      let parsed = ReportFormat::parse(f).ok_or_else(|| format!("unknown report format: {f}"))?;
+      let parsed =
+        ReportFormat::parse(f).ok_or_else(|| usage(format!("unknown report format: {f}")))?;
       if parsed != ReportFormat::Json {
-        return Err(format!("--json conflicts with --format {f}"));
+        return Err(usage(format!("--json conflicts with --format {f}")));
       }
       Ok(parsed)
     }
     (true, None) => Ok(ReportFormat::Json),
-    (false, Some(f)) => ReportFormat::parse(f)
-      .ok_or_else(|| format!("unknown report format: {f} (expected human, json, or tap)")),
+    (false, Some(f)) => ReportFormat::parse(f).ok_or_else(|| {
+      usage(format!(
+        "unknown report format: {f} (expected human, json, or tap)"
+      ))
+    }),
     (false, None) => Ok(ReportFormat::Human),
   }
 }

@@ -1107,7 +1107,7 @@ dependencies = [
 
 [[package]]
 name = "nix-assay"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "clap",
  "criterion",
@@ -1125,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "nixdrv"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "clap",
  "hex",
@@ -1142,7 +1142,7 @@ dependencies = [
 
 [[package]]
 name = "nixfetch"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64",
  "clap",
@@ -1161,7 +1161,7 @@ dependencies = [
 
 [[package]]
 name = "nixq"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "clap",
  "id_effect",
@@ -1174,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "nixstore"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64",
  "clap",

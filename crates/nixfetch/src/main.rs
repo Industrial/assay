@@ -14,7 +14,7 @@ use nixfetch::{
   DigestReport, FetchGitReport, FetchUrlReport, InfraError, RetryPolicy, StorePathReport,
   VerifyReport, fetch_git, fetch_url, hash, layer, store_path, verify,
 };
-use nixstore::edge::{CliError, from_result, print_line, run_main_coded_by};
+use nixstore::edge::{CliError, print_line, run_main_coded_by};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -162,8 +162,10 @@ fn run<A: Send + 'static>(
   render: fn(&A) -> Result<String, InfraError>,
 ) -> ExitCode {
   let program = command
-    .flat_map(move |out| from_result(render(&out)))
-    .flat_map(|text| print_line::<nixstore::InfraError>(text).map_err(InfraError::from))
+    .flat_map(move |out| match render(&out) {
+      Ok(text) => print_line::<nixstore::InfraError>(text).map_err(InfraError::from),
+      Err(e) => fail(e),
+    })
     .map(|()| 0u8)
     .map_err(CliError);
   run_main_coded_by(program, |e: &CliError<InfraError>| e.0.exit_code())

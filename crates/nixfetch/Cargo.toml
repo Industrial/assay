@@ -2,6 +2,7 @@
 name = "nixfetch"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 description = "nixfetch — fixed-output fetchurl/fetchgit download + flat/NAR hash verify"
 license.workspace = true
@@ -17,8 +18,8 @@ categories = ["development-tools", "command-line-utilities"]
 base64 = "0.22"
 clap = { version = "4.4", features = ["derive"] }
 hex = "0.4"
-nixdrv = { path = "../nixdrv", version = "0.2.1" }
-nixstore = { path = "../nixstore", version = "0.2.1" }
+nixdrv = { path = "../nixdrv", version = "0.3.0" }
+nixstore = { path = "../nixstore", version = "0.3.0" }
 # Async client: it runs as a task on the id_effect (tokio) executor; `reqwest::blocking` would
 # panic inside the runtime and park an executor thread.
 reqwest = { version = "0.12", default-features = false, features = [
@@ -45,6 +46,9 @@ default = ["cli-exit"]
 cli-exit = []
 # Exposes the in-memory fakes (`MemFs`, `FakeHttp`, `FakeGit`) for dependents' tests.
 test-support = []
+
+[lints]
+workspace = true
 
 [lib]
 name = "nixfetch"

@@ -13,7 +13,16 @@ use crate::error::InfraError;
 
 /// Lifts a finished `Result` into an effect that needs nothing (so `~from_result(..)` binds
 /// inside any `effect!` without annotations).
-pub fn from_result<A, E>(result: Result<A, E>) -> Effect<A, E> {
+// Passes the caller's `E` through unchanged: there is no error to convert with `From`.
+#[cfg_attr(
+  dylint_lib = "id_effect_lints",
+  allow(effect_error_bound_must_use_from)
+)]
+pub fn from_result<A, E>(result: Result<A, E>) -> Effect<A, E>
+where
+  A: Send + 'static,
+  E: Send + 'static,
+{
   match result {
     Ok(a) => succeed(a),
     Err(e) => fail(e),

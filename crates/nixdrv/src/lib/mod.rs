@@ -1,5 +1,13 @@
 //! nixdrv — derivation ATerm/JSON parse, project, CA store-path helpers.
 
+// id_effect_lints: `effect!`'s `~` binds lower to `.await`, which `no_await_outside_from_async`
+// flags (a false positive); ATerm / JSON parsing and store-path math stay pure and return
+// `Result` by design, lifted into `Effect` where a capability is involved.
+#![cfg_attr(
+  dylint_lib = "id_effect_lints",
+  allow(no_await_outside_from_async, no_result_return_in_pub_fn)
+)]
+
 pub mod ca;
 pub mod caps;
 pub mod commands;

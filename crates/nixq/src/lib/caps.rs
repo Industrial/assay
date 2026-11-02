@@ -44,6 +44,8 @@ mod fake {
 
   /// In-memory JSON source: path → bytes, plus stdin for `-` (tests; `test-support` feature).
   #[derive(Default)]
+  // A test fake's in-memory state, not fiber coordination.
+  #[cfg_attr(dylint_lib = "id_effect_lints", allow(no_mutex_for_fiber_coordination))]
   pub struct MockJsonSource {
     files: Arc<Mutex<HashMap<PathBuf, Vec<u8>>>>,
     stdin: Arc<Mutex<Vec<u8>>>,

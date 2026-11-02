@@ -2,6 +2,7 @@
 name = "nixstore"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 description = "nixstore — read-only Nix store path-info from db.sqlite"
 license.workspace = true
@@ -31,6 +32,9 @@ default = ["cli-exit"]
 cli-exit = []
 # Exposes `MockPathInfoStore` (in-memory fake) for dependents' tests.
 test-support = []
+
+[lints]
+workspace = true
 
 [lib]
 name = "nixstore"

@@ -614,6 +614,8 @@ pub fn describe_issues(errors: &ParseErrors) -> String {
 }
 
 #[cfg(test)]
+// Tests parse JSON fixtures directly; production decoding goes through `Schema`.
+#[cfg_attr(dylint_lib = "id_effect_lints", allow(schema_parsing_at_io_boundary))]
 mod tests {
   use super::*;
   use serde_json::json;

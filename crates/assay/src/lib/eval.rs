@@ -20,7 +20,7 @@ pub enum EvalResult {
 
 impl EvalResult {
   /// The result as an effect that needs nothing.
-  pub fn into_effect(self) -> Effect<Value, AssayOutcome> {
+  pub fn lift(self) -> Effect<Value, AssayOutcome> {
     match self {
       Self::Ok(v) => id_effect::succeed(v),
       Self::Err(e) => id_effect::fail(e),
