@@ -1,0 +1,44 @@
+[
+  {
+    "name": "badExpr",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "eqFails",
+    "outcome": {
+      "kind": "fail",
+      "value": {
+        "claim": "eq",
+        "left": 1,
+        "right": 2,
+        "diff": "~ $: 1 -> 2"
+      }
+    }
+  },
+  {
+    "name": "passes",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "throwsButDoesNot",
+    "outcome": {
+      "kind": "fail",
+      "value": {
+        "claim": "throws",
+        "left": 2,
+        "right": null,
+        "diff": "expression evaluated successfully; expected throw"
+      }
+    }
+  },
+  {
+    "name": "throwsWrongMessage",
+    "outcome": {
+      "kind": "pass"
+    }
+  }
+]

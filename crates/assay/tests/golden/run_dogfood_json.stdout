@@ -1,0 +1,74 @@
+[
+  {
+    "name": "badPatternThrows",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "elemPasses",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "emptyStringThrows",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "hasAttrsPasses",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "intInRangePasses",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "listOfTypePasses",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "missingAttrThrows",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "nonEmptyStringPasses",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "outOfRangeThrows",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "patternMatchPasses",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "supportedSystemPasses",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "unsupportedSystemThrows",
+    "outcome": {
+      "kind": "pass"
+    }
+  }
+]

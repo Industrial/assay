@@ -1,0 +1,25 @@
+{
+  "args": [
+    "-e",
+    "/nix/store/cccccccccccccccccccccccccccccccc-builder.sh"
+  ],
+  "builder": "/bin/sh",
+  "env": {
+    "builder": "/bin/sh",
+    "name": "simple-1.0",
+    "out": "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-simple-1.0"
+  },
+  "inputDrvs": {
+    "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-dep.drv": [
+      "out"
+    ]
+  },
+  "inputSrcs": [
+    "/nix/store/cccccccccccccccccccccccccccccccc-builder.sh"
+  ],
+  "name": "simple-1.0",
+  "outputs": {
+    "out": "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-simple-1.0"
+  },
+  "platform": "x86_64-linux"
+}

@@ -1,0 +1,10 @@
+{
+  "digest": {
+    "hex": "0000000000000000000000000000000000000000000000000000000000000000",
+    "nix32": "0000000000000000000000000000000000000000000000000000",
+    "sri": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  },
+  "hash": "mqjjs2d01b9g6kjf0531qrdvm6isvhnf",
+  "name": "hello",
+  "path": "/nix/store/mqjjs2d01b9g6kjf0531qrdvm6isvhnf-hello"
+}

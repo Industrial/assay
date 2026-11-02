@@ -1,0 +1,3 @@
+PASS merge_identity
+PASS merge_associativity
+PASS merge_idempotent

@@ -1,0 +1,6 @@
+{
+  "outputs": {
+    "out": "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-simple-1.0"
+  },
+  "system": "x86_64-linux"
+}
