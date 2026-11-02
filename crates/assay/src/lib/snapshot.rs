@@ -1,12 +1,17 @@
-//! Golden snapshot store — read, write, and assert JSON fixtures on disk.
+//! Golden snapshot store — read, write, and assert JSON fixtures through the [`Fs`] capability.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use id_effect::{Effect, fail, succeed};
+use nixstore::edge::from_result;
 use serde_json::Value;
 
+use crate::files::Fs;
 use crate::outcome::AssayOutcome;
+use crate::verdict::InfraError;
 
-/// Filesystem-backed store for named JSON snapshot goldens.
+/// Where named JSON snapshot goldens live (`{root}/{name}.json`) and whether to rewrite them.
 #[derive(Debug, Clone)]
 pub struct SnapshotStore {
   pub root: PathBuf,
@@ -28,61 +33,65 @@ impl SnapshotStore {
   }
 
   /// The golden `name` (`None` when it does not exist); errors name the golden's path.
-  pub fn read(&self, name: &str) -> Result<Option<Value>, String> {
-    let path = self.golden_path(name);
-    if !path.exists() {
-      return Ok(None);
-    }
-    let at = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-    let text = std::fs::read_to_string(&path).map_err(|e| at(&e))?;
-    serde_json::from_str(&text).map(Some).map_err(|e| at(&e))
+  pub fn read(&self, fs: &Arc<dyn Fs>, name: &str) -> Effect<Option<Value>, InfraError> {
+    let (fs, path) = (Arc::clone(fs), self.golden_path(name));
+    fs.kind(&path).flat_map(move |kind| match kind {
+      None => succeed(None),
+      Some(_) => fs.read_text(&path).flat_map(move |text| {
+        from_result(
+          serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|e| at(&path, &e)),
+        )
+      }),
+    })
   }
 
   /// Writes `value` as the golden `name` (pretty JSON plus newline), creating parent dirs.
-  pub fn write(&self, name: &str, value: &Value) -> Result<(), String> {
+  pub fn write(&self, fs: &Arc<dyn Fs>, name: &str, value: &Value) -> Effect<(), InfraError> {
     let path = self.golden_path(name);
-    let at = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-    if let Some(parent) = path.parent() {
-      std::fs::create_dir_all(parent).map_err(|e| at(&e))?;
+    match serde_json::to_string_pretty(value) {
+      Ok(text) => fs.write_text(&path, format!("{text}\n")),
+      Err(e) => fail(at(&path, &e)),
     }
-    let text = serde_json::to_string_pretty(value).map_err(|e| at(&e))?;
-    std::fs::write(&path, format!("{text}\n")).map_err(|e| at(&e))
   }
 
-  pub fn assert_match(&self, name: &str, observed: &Value, update: bool) -> AssayOutcome {
-    let update = update || self.update_snapshots;
-    let path = self.golden_path(name);
-    if update {
-      return match self.write(name, observed) {
-        Ok(()) => AssayOutcome::Pass,
-        Err(err) => io_error(err),
-      };
-    }
-
-    let expected = match self.read(name) {
-      Ok(Some(value)) => value,
-      Ok(None) => {
-        return AssayOutcome::SnapshotMismatch {
-          path: display_path(&path),
-          diff: "golden missing".into(),
-        };
-      }
-      Err(err) => return io_error(err),
-    };
-
-    if &expected == observed {
-      AssayOutcome::Pass
+  /// Judges `observed` against the golden `name` (rewriting it when `update` or
+  /// [`SnapshotStore::update_snapshots`]). Never fails: an unreadable golden is the `io`
+  /// outcome.
+  pub fn assert_match(
+    &self,
+    fs: &Arc<dyn Fs>,
+    name: &str,
+    observed: Value,
+    update: bool,
+  ) -> Effect<AssayOutcome, InfraError> {
+    let judged = if update || self.update_snapshots {
+      self.write(fs, name, &observed).map(|()| AssayOutcome::Pass)
     } else {
-      AssayOutcome::SnapshotMismatch {
-        path: display_path(&path),
-        diff: snapshot_diff(&expected, observed),
-      }
-    }
+      let path = display_path(&self.golden_path(name));
+      self.read(fs, name).map(move |golden| match golden {
+        None => AssayOutcome::SnapshotMismatch {
+          path,
+          diff: "golden missing".into(),
+        },
+        Some(expected) if expected == observed => AssayOutcome::Pass,
+        Some(expected) => AssayOutcome::SnapshotMismatch {
+          path,
+          diff: snapshot_diff(&expected, &observed),
+        },
+      })
+    };
+    judged.catch(|e| succeed(io_error(e)))
   }
 
   fn golden_path(&self, name: &str) -> PathBuf {
     self.root.join(format!("{name}.json"))
   }
+}
+
+fn at(path: &Path, e: &dyn std::fmt::Display) -> InfraError {
+  InfraError::Io(format!("{}: {e}", path.display()))
 }
 
 fn snapshot_diff(expected: &Value, observed: &Value) -> String {
@@ -98,97 +107,96 @@ fn display_path(path: &Path) -> String {
   path.display().to_string()
 }
 
-fn io_error(message: String) -> AssayOutcome {
+fn io_error(e: InfraError) -> AssayOutcome {
   AssayOutcome::EvalError {
     kind: "io".into(),
-    message,
+    message: match e {
+      InfraError::Io(message) => message,
+      other => other.to_string(),
+    },
     span: None,
   }
 }
 
 #[cfg(test)]
 mod tests {
-  use super::*;
+  use id_effect::{expect_exit_success, run_test};
   use serde_json::json;
 
-  struct TempStore {
-    _dir: std::path::PathBuf,
-    store: SnapshotStore,
+  use super::*;
+  use crate::fake::MemFs;
+
+  fn store() -> (SnapshotStore, Arc<dyn Fs>) {
+    (SnapshotStore::new("/goldens"), Arc::new(MemFs::default()))
   }
 
-  impl TempStore {
-    fn new() -> Self {
-      let dir = std::env::temp_dir().join(format!(
-        "assay-snapshot-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-          .duration_since(std::time::UNIX_EPOCH)
-          .unwrap()
-          .as_nanos()
-      ));
-      std::fs::create_dir_all(&dir).expect("tempdir");
-      Self {
-        store: SnapshotStore::new(&dir),
-        _dir: dir,
-      }
-    }
+  fn read(store: &SnapshotStore, fs: &Arc<dyn Fs>, name: &str) -> Option<Value> {
+    expect_exit_success(run_test(store.read(fs, name)))
   }
 
-  impl Drop for TempStore {
-    fn drop(&mut self) {
-      let _ = std::fs::remove_dir_all(&self._dir);
-    }
+  fn write(store: &SnapshotStore, fs: &Arc<dyn Fs>, name: &str, value: &Value) {
+    expect_exit_success(run_test(store.write(fs, name, value)));
+  }
+
+  fn judge(store: &SnapshotStore, fs: &Arc<dyn Fs>, name: &str, observed: Value) -> AssayOutcome {
+    expect_exit_success(run_test(store.assert_match(fs, name, observed, false)))
   }
 
   #[test]
   fn read_missing_returns_none() {
-    let temp = TempStore::new();
-    let store = &temp.store;
-    assert!(store.read("missing").unwrap().is_none());
+    let (store, fs) = store();
+    assert!(read(&store, &fs, "missing").is_none());
   }
 
   #[test]
   fn write_then_read_round_trips() {
-    let temp = TempStore::new();
-    let store = &temp.store;
+    let (store, fs) = store();
     let value = json!({"a": 1, "b": [2, 3]});
-    store.write("roundtrip", &value).unwrap();
-    assert_eq!(store.read("roundtrip").unwrap(), Some(value));
+    write(&store, &fs, "roundtrip", &value);
+    assert_eq!(read(&store, &fs, "roundtrip"), Some(value));
   }
 
   #[test]
-  fn write_nested_golden_creates_parent_dirs() {
-    let temp = TempStore::new();
-    let store = &temp.store;
+  fn write_is_pretty_json_with_newline() {
+    let (store, fs) = store();
+    write(&store, &fs, "pretty", &json!({"a": 1}));
+    let text = expect_exit_success(run_test(fs.read_text(Path::new("/goldens/pretty.json"))));
+    assert_eq!(text, "{\n  \"a\": 1\n}\n");
+  }
+
+  #[test]
+  fn write_nested_golden() {
+    let (store, fs) = store();
     let value = json!({"nested": true});
-    store.write("nested/deep/golden", &value).unwrap();
-    assert_eq!(store.read("nested/deep/golden").unwrap(), Some(value));
+    write(&store, &fs, "nested/deep/golden", &value);
+    assert_eq!(read(&store, &fs, "nested/deep/golden"), Some(value));
   }
 
   #[test]
   fn assert_match_passes_when_equal() {
-    let temp = TempStore::new();
-    let store = &temp.store;
+    let (store, fs) = store();
     let value = json!({"x": 1});
-    store.write("eq", &value).unwrap();
-    assert_eq!(store.assert_match("eq", &value, false), AssayOutcome::Pass);
+    write(&store, &fs, "eq", &value);
+    assert_eq!(judge(&store, &fs, "eq", value), AssayOutcome::Pass);
   }
 
   #[test]
   fn assert_match_missing_is_snapshot_mismatch() {
-    let temp = TempStore::new();
-    let store = &temp.store;
-    let out = store.assert_match("absent", &json!(1), false);
-    assert!(matches!(out, AssayOutcome::SnapshotMismatch { .. }));
+    let (store, fs) = store();
+    assert_eq!(
+      judge(&store, &fs, "absent", json!(1)),
+      AssayOutcome::SnapshotMismatch {
+        path: "/goldens/absent.json".into(),
+        diff: "golden missing".into(),
+      }
+    );
   }
 
   #[test]
   fn assert_match_differs_reports_structural_diff() {
-    let temp = TempStore::new();
-    let store = &temp.store;
-    store.write("diff", &json!({"a": 1})).unwrap();
-    let out = store.assert_match("diff", &json!({"a": 2}), false);
-    match out {
+    let (store, fs) = store();
+    write(&store, &fs, "diff", &json!({"a": 1}));
+    match judge(&store, &fs, "diff", json!({"a": 2})) {
       AssayOutcome::SnapshotMismatch { diff, .. } => assert!(diff.contains("$.a")),
       other => panic!("expected SnapshotMismatch, got {other:?}"),
     }
@@ -196,11 +204,16 @@ mod tests {
 
   #[test]
   fn assert_match_update_writes_and_passes() {
-    let temp = TempStore::new();
-    let store = &temp.store;
+    let (store, fs) = store();
     let value = json!({"fresh": true});
-    assert_eq!(store.assert_match("new", &value, true), AssayOutcome::Pass);
-    assert_eq!(store.read("new").unwrap(), Some(value));
+    let out = expect_exit_success(run_test(store.assert_match(
+      &fs,
+      "new",
+      value.clone(),
+      true,
+    )));
+    assert_eq!(out, AssayOutcome::Pass);
+    assert_eq!(read(&store, &fs, "new"), Some(value));
   }
 
   #[test]
@@ -213,37 +226,44 @@ mod tests {
 
   #[test]
   fn assert_match_corrupt_golden_returns_io_error() {
-    let temp = TempStore::new();
-    let store = &temp.store;
-    store.write("corrupt", &json!(1)).unwrap();
-    let path = temp.store.root.join("corrupt.json");
-    std::fs::write(&path, "not-json").unwrap();
-    match store.assert_match("corrupt", &json!(2), false) {
-      AssayOutcome::EvalError { kind, .. } => assert_eq!(kind, "io"),
+    let (store, fs) = store();
+    expect_exit_success(run_test(
+      fs.write_text(Path::new("/goldens/corrupt.json"), "not-json".into()),
+    ));
+    match judge(&store, &fs, "corrupt", json!(2)) {
+      AssayOutcome::EvalError { kind, message, .. } => {
+        assert_eq!(kind, "io");
+        assert!(message.starts_with("/goldens/corrupt.json: "), "{message}");
+      }
       other => panic!("expected io error, got {other:?}"),
     }
   }
 
   #[test]
-  fn write_without_parent_directory() {
-    let name = format!("assay_snap_bare_{}", std::process::id());
-    let store = SnapshotStore::new("");
-    let path = PathBuf::from(format!("{name}.json"));
-    let _ = std::fs::remove_file(&path);
-    store.write(&name, &json!(1)).unwrap();
-    assert!(path.exists());
-    let _ = std::fs::remove_file(path);
+  fn with_update_flag_drives_assert_match() {
+    let (store, fs) = store();
+    let store = store.with_update(true);
+    let value = json!({"flag": true});
+    assert_eq!(
+      judge(&store, &fs, "flagged", value.clone()),
+      AssayOutcome::Pass
+    );
+    assert_eq!(read(&store, &fs, "flagged"), Some(value));
   }
 
   #[test]
-  fn with_update_flag_drives_assert_match() {
-    let temp = TempStore::new();
-    let store = temp.store.clone().with_update(true);
-    let value = json!({"flag": true});
+  fn io_error_keeps_io_messages() {
     assert_eq!(
-      store.assert_match("flagged", &value, false),
-      AssayOutcome::Pass
+      io_error(InfraError::Io("p: denied".into())),
+      AssayOutcome::EvalError {
+        kind: "io".into(),
+        message: "p: denied".into(),
+        span: None,
+      }
     );
-    assert_eq!(store.read("flagged").unwrap(), Some(value));
+    assert!(matches!(
+      io_error(InfraError::Worker("w".into())),
+      AssayOutcome::EvalError { message, .. } if message == "runner error: w"
+    ));
   }
 }

@@ -19,7 +19,7 @@ use serde::Serialize;
 
 use assay::{
   AssayOutcome, InfraError, ReportFormat, RunOptions, SnapshotStore, Trace, default_snapshot_root,
-  discover_suites, layer, render_report, run_discovered, run_suite, store_root_from, summarize,
+  discover, fs_layer, layer, render_report, run_path, store_root_from, summarize,
 };
 
 #[derive(Parser)]
@@ -136,12 +136,7 @@ fn cmd_run(
   let snapshots = SnapshotStore::new(default_snapshot_root()).with_update(opts.update_snapshots);
   let store_root = store_root_from(std::env::var_os("ASSAY_NIX_STORE"));
   let trace = opts.trace.clone();
-  let run = if path.is_dir() {
-    run_discovered(&path, &opts)
-  } else {
-    run_suite(&path, &opts)
-  };
-  run
+  run_path(&path, &opts)
     .provide_layer(layer::<InfraError>(store_root, snapshots))
     .map_err(MainError::from)
     .flat_map(move |report| {
@@ -173,20 +168,17 @@ fn resolve_format(json: bool, format: Option<&str>) -> Result<ReportFormat, Stri
 
 /// `assay discover`: one line per suite file.
 fn cmd_discover(path: PathBuf) -> Effect<u8, MainError> {
-  suspend(move || {
-    from_result(
-      discover_suites(&path)
-        .map_err(|e| MainError::Infra(InfraError::Io(format!("discover {}: {e}", path.display())))),
-    )
-  })
-  .flat_map(|suites| {
-    let text: String = suites
-      .iter()
-      .map(|s| format!("{} ({:?})\n", s.path.display(), s.kind))
-      .collect();
-    print_text(text)
-  })
-  .map(|()| 0)
+  discover(&path)
+    .provide_layer(fs_layer::<InfraError>())
+    .map_err(move |e| MainError::Infra(InfraError::Io(format!("discover {}: {e}", path.display()))))
+    .flat_map(|suites| {
+      let text: String = suites
+        .iter()
+        .map(|s| format!("{} ({:?})\n", s.path.display(), s.kind))
+        .collect();
+      print_text(text)
+    })
+    .map(|()| 0)
 }
 
 /// `assay laws`: runs the built-in laws; exits 1 when any fails.

@@ -12,17 +12,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use id_effect::{Concurrency, Effect, Exit, Schedule, for_each_par, sync};
-use nixstore::edge::from_result;
+use id_effect::{Concurrency, Effect, Exit, Schedule, for_each_par, need};
 use serde::Serialize;
 
 use crate::assay_suite::load_assay_suite;
 use crate::batch::{partition_cases, run_batch};
-use crate::caps::AssayEnv;
+use crate::caps::{AssayEnv, FsService, NixEvalService, SuiteEnv};
 use crate::claims::{Claim, ClaimCaps, claim_caps, interpret_with};
 use crate::compat::load_compat_suite;
 use crate::discover::{SuiteKind, discover_suites, suite_kind};
 use crate::eval::NixEval;
+use crate::files::{EntryKind, Fs};
 use crate::outcome::AssayOutcome;
 use crate::verdict::{CaseVerdict, InfraError, case_exit_byte, exit_to_outcome};
 
@@ -133,6 +133,24 @@ pub struct RunSummary {
 
 type NamedExit = (String, Exit<CaseVerdict, InfraError>);
 
+/// `assay run <path>`: [`run_discovered`] when `path` is a directory, else [`run_suite`].
+pub fn run_path(path: &Path, opts: &RunOptions) -> Effect<SuiteReport, InfraError, AssayEnv> {
+  let (path, opts) = (path.to_path_buf(), opts.clone());
+  claim_caps().flat_map(move |caps| {
+    caps
+      .fs
+      .kind(&path)
+      .flat_map(move |kind| {
+        if kind == Some(EntryKind::Dir) {
+          run_discovered_with(caps, path, opts)
+        } else {
+          run_suite_with(caps, path, opts)
+        }
+      })
+      .any_env()
+  })
+}
+
 /// Runs the suite file at `path`. A suite that cannot be loaded fails the run.
 pub fn run_suite(path: &Path, opts: &RunOptions) -> Effect<SuiteReport, InfraError, AssayEnv> {
   let (path, opts) = (path.to_path_buf(), opts.clone());
@@ -146,7 +164,7 @@ pub fn run_suite_with(
   opts: RunOptions,
 ) -> Effect<SuiteReport, InfraError> {
   let trace = opts.trace.clone();
-  load_suite_cases(&caps.eval, &path)
+  load_suite_cases(&caps.eval, &caps.fs, &path)
     .flat_map(move |cases| {
       trace.note(format!("load_suite ({} cases)", cases.len()));
       run_cases(cases, caps, opts)
@@ -168,15 +186,14 @@ pub fn run_discovered_with(
   opts: RunOptions,
 ) -> Effect<SuiteReport, InfraError> {
   let jobs = Concurrency::Bounded(opts.jobs.max(1));
-  let eval = Arc::clone(&caps.eval);
-  sync(move || discover_suites(&root))
-    .flat_map(from_result)
+  let (eval, fs) = (Arc::clone(&caps.eval), Arc::clone(&caps.fs));
+  discover_suites(&caps.fs, &root)
     .flat_map(move |suites| {
       for_each_par(
         suites,
         move |suite| {
           let prefix = suite.path.display().to_string();
-          load_suite_cases(&eval, &suite.path).map(move |cases| {
+          load_suite_cases(&eval, &fs, &suite.path).map(move |cases| {
             cases
               .into_iter()
               .map(|(name, claim)| (format!("{prefix}::{name}"), claim))
@@ -190,14 +207,25 @@ pub fn run_discovered_with(
     .map(|outcomes| SuiteReport { outcomes })
 }
 
-/// The cases of one suite file (its kind decides the loader).
-fn load_suite_cases(
+/// [`load_suite_cases`] with the capabilities from [`SuiteEnv`].
+pub fn load_suite(path: &Path) -> Effect<Vec<(String, Claim)>, InfraError, SuiteEnv> {
+  let path = path.to_path_buf();
+  need::<NixEvalService>().flat_map(move |eval: Arc<NixEvalService>| {
+    need::<FsService>()
+      .flat_map(move |fs: Arc<FsService>| load_suite_cases(&eval.0, &fs.0, &path).any_env())
+  })
+}
+
+/// The cases of one suite file (its kind decides the loader): `.nix` suites are evaluated with
+/// `eval`, `.json` suites read with `fs`.
+pub fn load_suite_cases(
   eval: &Arc<dyn NixEval>,
+  fs: &Arc<dyn Fs>,
   path: &Path,
 ) -> Effect<Vec<(String, Claim)>, InfraError> {
   match suite_kind(path).unwrap_or(SuiteKind::CompatJson) {
     SuiteKind::CompatJson | SuiteKind::CompatNix => {
-      load_compat_suite(Arc::clone(eval), path).map(|suite| {
+      load_compat_suite(Arc::clone(eval), Arc::clone(fs), path).map(|suite| {
         suite
           .cases
           .into_iter()
@@ -213,7 +241,7 @@ fn load_suite_cases(
           .collect()
       })
     }
-    SuiteKind::AssayNix => load_assay_suite(Arc::clone(eval), path),
+    SuiteKind::AssayNix => load_assay_suite(Arc::clone(eval), Arc::clone(fs), path),
   }
 }
 
@@ -317,6 +345,7 @@ mod tests {
       eval: Arc::new(eval),
       snapshots: temp_snapshot_store(),
       path_info: Arc::new(nixstore::MockPathInfoStore::default()),
+      fs: Arc::new(crate::fake::MemFs::default()),
     }
   }
 
@@ -440,6 +469,7 @@ mod tests {
       eval: Arc::clone(&eval) as Arc<dyn NixEval>,
       snapshots: temp_snapshot_store(),
       path_info: Arc::new(nixstore::MockPathInfoStore::default()),
+      fs: Arc::new(crate::fake::MemFs::default()),
     };
     let exec = TestExecutor::new();
     let mut out = expect_exit_success(run_test_on(

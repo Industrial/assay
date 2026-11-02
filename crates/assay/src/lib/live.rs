@@ -1,5 +1,6 @@
-//! Live adapters: `nix eval` through `tokio::process` and the lazily opened store database.
-//! This is the only module that spawns processes or opens the store.
+//! Live adapters: `nix eval` through `tokio::process`, the local filesystem and the lazily
+//! opened store database. This is the only module that spawns processes, touches files or opens
+//! the store.
 //!
 //! # Where the work runs
 //!
@@ -23,7 +24,9 @@ use serde_json::Value;
 use tokio::sync::oneshot;
 
 use crate::eval::{NixEval, eval_output, nix_spawn_error, nix_spawn_error_for_path};
+use crate::files::{DirEntry, EntryKind, Fs};
 use crate::outcome::AssayOutcome;
+use crate::verdict::InfraError;
 
 /// The outcome a task hands back: `None` when it ended without one (it panicked).
 fn settle<A, E>(out: Option<Result<A, E>>) -> Effect<A, E>
@@ -34,7 +37,7 @@ where
   match out {
     Some(Ok(a)) => succeed(a),
     Some(Err(e)) => fail(e),
-    None => die("assay: a nix task ended without a result"),
+    None => die("assay: an executor task (nix or fs) ended without a result"),
   }
 }
 
@@ -171,6 +174,81 @@ impl TempDir {
   }
 }
 
+// ── filesystem ──────────────────────────────────────────────────────────────────────────────
+
+/// Runs the blocking `f` on the executor's blocking pool and awaits its result.
+fn blocking<A, E>(f: impl FnOnce() -> Result<A, E> + Send + 'static) -> Effect<A, E>
+where
+  A: Send + 'static,
+  E: Send + 'static,
+{
+  Effect::from_ctx(move |ctx: Ctx<HNil>| {
+    let (tx, rx) = oneshot::channel();
+    ctx.fiber().executor().spawn_blocking(Box::new(move || {
+      let _ = tx.send(f());
+    }));
+    async move { Ok::<_, E>(rx.await.ok()) }
+  })
+  .flat_map(settle)
+}
+
+/// The local filesystem (`std::fs` on the executor's blocking pool).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LiveFs;
+
+fn fs_error(path: &Path, e: &std::io::Error) -> InfraError {
+  InfraError::Io(format!("{}: {e}", path.display()))
+}
+
+fn list_dir(dir: &Path) -> Result<Vec<DirEntry>, InfraError> {
+  let mut entries = Vec::new();
+  for entry in std::fs::read_dir(dir).map_err(|e| fs_error(dir, &e))? {
+    let path = entry.map_err(|e| fs_error(dir, &e))?.path();
+    entries.push(DirEntry {
+      is_dir: path.is_dir(),
+      path,
+    });
+  }
+  Ok(entries)
+}
+
+impl Fs for LiveFs {
+  fn read_text(&self, path: &Path) -> Effect<String, InfraError> {
+    let path = path.to_path_buf();
+    blocking(move || std::fs::read_to_string(&path).map_err(|e| fs_error(&path, &e)))
+  }
+
+  fn write_text(&self, path: &Path, text: String) -> Effect<(), InfraError> {
+    let path = path.to_path_buf();
+    blocking(move || {
+      if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| fs_error(&path, &e))?;
+      }
+      std::fs::write(&path, text).map_err(|e| fs_error(&path, &e))
+    })
+  }
+
+  fn kind(&self, path: &Path) -> Effect<Option<EntryKind>, InfraError> {
+    let path = path.to_path_buf();
+    blocking(move || {
+      Ok(std::fs::metadata(&path).ok().map(|meta| {
+        if meta.is_file() {
+          EntryKind::File
+        } else if meta.is_dir() {
+          EntryKind::Dir
+        } else {
+          EntryKind::Other
+        }
+      }))
+    })
+  }
+
+  fn read_dir(&self, path: &Path) -> Effect<Vec<DirEntry>, InfraError> {
+    let path = path.to_path_buf();
+    blocking(move || list_dir(&path))
+  }
+}
+
 // ── store ───────────────────────────────────────────────────────────────────────────────────
 
 /// The store database under `store_root`, opened on the first query and kept open after.
@@ -252,6 +330,49 @@ mod tests {
       expect_exit_failure(missing.block_on()),
       AssayOutcome::EvalError { .. }
     ));
+  }
+
+  #[test]
+  fn live_fs_reads_writes_and_lists() {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("assay-live-fs-{}-{n}", std::process::id()));
+    let file = root.join("a/b/f.json");
+    expect_exit_success(run_test(LiveFs.write_text(&file, "{}\n".into())));
+    assert_eq!(
+      expect_exit_success(run_test(LiveFs.read_text(&file))),
+      "{}\n"
+    );
+    assert_eq!(
+      expect_exit_success(run_test(LiveFs.kind(&file))),
+      Some(EntryKind::File)
+    );
+    assert_eq!(
+      expect_exit_success(run_test(LiveFs.kind(&root))),
+      Some(EntryKind::Dir)
+    );
+    assert_eq!(
+      expect_exit_success(run_test(LiveFs.kind(&root.join("none")))),
+      None
+    );
+    assert_eq!(
+      expect_exit_success(run_test(LiveFs.read_dir(&root))),
+      [DirEntry {
+        path: root.join("a"),
+        is_dir: true
+      }]
+    );
+    let missing = root.join("missing");
+    let err = expect_exit_failure(run_test(LiveFs.read_text(&missing)));
+    assert!(
+      matches!(&err, InfraError::Io(m) if m.starts_with(&format!("{}: ", missing.display()))),
+      "{err:?}"
+    );
+    assert!(matches!(
+      expect_exit_failure(run_test(LiveFs.read_dir(&missing))),
+      InfraError::Io(_)
+    ));
+    let _ = std::fs::remove_dir_all(root);
   }
 
   #[test]

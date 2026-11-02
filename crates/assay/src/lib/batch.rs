@@ -10,13 +10,13 @@ use std::sync::Arc;
 
 use crate::claims::{Claim, ClaimCaps, interpret_with};
 use crate::eval::NixEval;
+use crate::files::Fs;
 use crate::outcome::AssayOutcome;
 use crate::run::Trace;
 use crate::snapshot::SnapshotStore;
 use crate::verdict::{CaseVerdict, InfraError, outcome_to_exit};
 use id_effect::{Concurrency, Effect, Exit, all, fail, succeed};
 use nixq::{normalize_value, structural_diff, value_contains_subset};
-use nixstore::edge::from_result;
 
 /// Marker embedded in generated Nix so mocks / debuggers can recognize batches.
 pub const BATCH_MARKER: &str = "__assayBatch";
@@ -209,7 +209,33 @@ fn decode_try(node: &Value) -> Result<Option<Value>, AssayOutcome> {
   }
 }
 
-fn slot_outcome(slot: &BatchSlot, row: &Value, store: &SnapshotStore) -> AssayOutcome {
+/// The verdict of one slot from its `row`; a snapshot slot's value is judged against its golden
+/// (read through `fs`).
+fn slot_outcome(
+  slot: &BatchSlot,
+  row: &Value,
+  store: &SnapshotStore,
+  fs: &Arc<dyn Fs>,
+) -> Effect<AssayOutcome, InfraError> {
+  let kind = row.get("kind").and_then(Value::as_str).unwrap_or("");
+  match (&slot.kind, kind) {
+    (BatchKind::Snapshot { snap_name }, "snapshot") => {
+      match decode_try(row.get("primary").unwrap_or(&Value::Null)) {
+        Ok(Some(actual)) => store.assert_match(fs, snap_name, actual, store.update_snapshots),
+        Ok(None) => succeed(AssayOutcome::EvalError {
+          kind: "throw".into(),
+          message: "snapshot expr failed to evaluate".into(),
+          span: None,
+        }),
+        Err(e) => succeed(e),
+      }
+    }
+    _ => succeed(value_slot_outcome(slot, row)),
+  }
+}
+
+/// The verdict of a slot judged from its `row` alone (every kind but a snapshot's value).
+fn value_slot_outcome(slot: &BatchSlot, row: &Value) -> AssayOutcome {
   let kind = row.get("kind").and_then(Value::as_str).unwrap_or("");
   match (&slot.kind, kind) {
     (BatchKind::Eq, "eq") => {
@@ -311,17 +337,6 @@ fn slot_outcome(slot: &BatchSlot, row: &Value, store: &SnapshotStore) -> AssayOu
         },
       }
     }
-    (BatchKind::Snapshot { snap_name }, "snapshot") => {
-      match decode_try(row.get("primary").unwrap_or(&Value::Null)) {
-        Ok(Some(actual)) => store.assert_match(snap_name, &actual, store.update_snapshots),
-        Ok(None) => AssayOutcome::EvalError {
-          kind: "throw".into(),
-          message: "snapshot expr failed to evaluate".into(),
-          span: None,
-        },
-        Err(e) => e,
-      }
-    }
     _ => AssayOutcome::EvalError {
       kind: "batch".into(),
       message: format!(
@@ -388,7 +403,7 @@ pub fn run_batch(
     slots.len(),
     expr.len()
   ));
-  let store = caps.snapshots.clone();
+  let (store, fs) = (caps.snapshots.clone(), Arc::clone(&caps.fs));
   let on_fail = trace.clone();
   eval_batch_expr(&caps.eval, &expr)
     .map(Ok)
@@ -396,7 +411,7 @@ pub fn run_batch(
     .flat_map(move |evaluated| match evaluated {
       Ok(value) => {
         trace.note("eval_batch".into());
-        from_result(batch_results(&value, &slots, &store))
+        batch_results(&value, &slots, &store, &fs)
       }
       Err(_batch_err) => {
         on_fail.note("eval_batch FAIL -> fallback".into());
@@ -405,49 +420,49 @@ pub fn run_batch(
     })
 }
 
-/// The verdict of every slot from the batch's `results` array.
+/// The verdict of every slot from the batch's `results` array, in slot order.
 fn batch_results(
   value: &Value,
   slots: &[BatchSlot],
   store: &SnapshotStore,
-) -> Result<Vec<NamedExit>, InfraError> {
-  let results = value
-    .get("results")
-    .and_then(Value::as_array)
-    .ok_or_else(|| {
-      InfraError::Worker(format!(
-        "batch eval missing results array (marker {BATCH_MARKER})"
-      ))
-    })?;
+  fs: &Arc<dyn Fs>,
+) -> Effect<Vec<NamedExit>, InfraError> {
+  let Some(results) = value.get("results").and_then(Value::as_array) else {
+    return fail(InfraError::Worker(format!(
+      "batch eval missing results array (marker {BATCH_MARKER})"
+    )));
+  };
 
   if results.len() != slots.len() {
-    return Err(InfraError::Worker(format!(
+    return fail(InfraError::Worker(format!(
       "batch result count {} != slot count {}",
       results.len(),
       slots.len()
     )));
   }
 
-  Ok(
-    slots
-      .iter()
-      .zip(results.iter())
-      .map(|(slot, row)| {
-        let outcome = slot_outcome(slot, row, store);
-        (slot.name.clone(), outcome_to_exit(outcome))
-      })
-      .collect(),
-  )
+  let judged = slots.iter().zip(results.iter()).map(|(slot, row)| {
+    let name = slot.name.clone();
+    slot_outcome(slot, row, store, fs).map(move |outcome| (name, outcome_to_exit(outcome)))
+  });
+  all(judged.collect::<Vec<_>>(), Concurrency::Sequential)
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
   use crate::eval::EvalResult;
+  use crate::fake::MemFs;
   use crate::live::LiveNixEval;
   use crate::snapshot::SnapshotStore;
-  use id_effect::run_test;
+  use id_effect::{expect_exit_success, run_test};
   use std::path::PathBuf;
+
+  /// [`slot_outcome`] over an empty in-memory filesystem, run to completion.
+  fn judge(slot: &BatchSlot, row: &Value, store: &SnapshotStore) -> AssayOutcome {
+    let fs: Arc<dyn Fs> = Arc::new(MemFs::default());
+    expect_exit_success(run_test(slot_outcome(slot, row, store, &fs)))
+  }
 
   /// [`run_batch`] over `eval` and `store`, run to completion.
   fn run_batch_with(
@@ -459,6 +474,7 @@ mod tests {
       eval: Arc::new(eval),
       snapshots: store.clone(),
       path_info: Arc::new(nixstore::MockPathInfoStore::default()),
+      fs: Arc::new(MemFs::default()),
     };
     run_test(run_batch(cases.to_vec(), caps, Trace::default()))
       .into_result()
@@ -571,20 +587,20 @@ mod tests {
         "right": {"ok": true, "value": 2}
     });
     assert!(matches!(
-      slot_outcome(&slot, &fail_row, &store),
+      judge(&slot, &fail_row, &store),
       AssayOutcome::Fail { .. }
     ));
 
     let left_throw =
       json!({"kind": "eq", "left": {"ok": false}, "right": {"ok": true, "value": 1}});
     assert!(matches!(
-      slot_outcome(&slot, &left_throw, &store),
+      judge(&slot, &left_throw, &store),
       AssayOutcome::EvalError { .. }
     ));
 
     let mismatch = json!({"kind": "subset", "primary": {"ok": true, "value": {}}});
     assert!(matches!(
-      slot_outcome(&slot, &mismatch, &store),
+      judge(&slot, &mismatch, &store),
       AssayOutcome::EvalError { .. }
     ));
   }
@@ -599,14 +615,11 @@ mod tests {
       },
     );
     let subset_ok = json!({"kind": "subset", "primary": {"ok": true, "value": {"a": 1, "b": 2}}});
-    assert_eq!(
-      slot_outcome(&subset, &subset_ok, &store),
-      AssayOutcome::Pass
-    );
+    assert_eq!(judge(&subset, &subset_ok, &store), AssayOutcome::Pass);
 
     let subset_fail = json!({"kind": "subset", "primary": {"ok": true, "value": {"a": 9}}});
     assert!(matches!(
-      slot_outcome(&subset, &subset_fail, &store),
+      judge(&subset, &subset_fail, &store),
       AssayOutcome::Fail { .. }
     ));
 
@@ -617,10 +630,10 @@ mod tests {
       },
     );
     let has_ok = json!({"kind": "hasAttrs", "primary": {"ok": true, "keys": ["a"]}});
-    assert_eq!(slot_outcome(&has, &has_ok, &store), AssayOutcome::Pass);
+    assert_eq!(judge(&has, &has_ok, &store), AssayOutcome::Pass);
     let has_missing = json!({"kind": "hasAttrs", "primary": {"ok": true, "keys": []}});
     assert!(matches!(
-      slot_outcome(&has, &has_missing, &store),
+      judge(&has, &has_missing, &store),
       AssayOutcome::Fail { .. }
     ));
 
@@ -632,7 +645,7 @@ mod tests {
     );
     let snap_row = json!({"kind": "snapshot", "primary": {"ok": true, "value": {"x": 1}}});
     assert!(matches!(
-      slot_outcome(&snap, &snap_row, &store),
+      judge(&snap, &snap_row, &store),
       AssayOutcome::SnapshotMismatch { .. }
     ));
   }
@@ -816,7 +829,7 @@ mod tests {
         "right": {"ok": false}
     });
     assert!(matches!(
-      slot_outcome(&eq, &right_throw, &store),
+      judge(&eq, &right_throw, &store),
       AssayOutcome::EvalError { .. }
     ));
 
@@ -828,13 +841,13 @@ mod tests {
     );
     let bad_decode = json!({"kind": "subset", "primary": "nope"});
     assert!(matches!(
-      slot_outcome(&subset, &bad_decode, &store),
+      judge(&subset, &bad_decode, &store),
       AssayOutcome::EvalError { .. }
     ));
 
     let subset_throw = json!({"kind": "subset", "primary": {"ok": false}});
     assert!(matches!(
-      slot_outcome(&subset, &subset_throw, &store),
+      judge(&subset, &subset_throw, &store),
       AssayOutcome::EvalError { .. }
     ));
 
@@ -846,12 +859,12 @@ mod tests {
     );
     let has_false = json!({"kind": "hasAttrs", "primary": {"ok": false}});
     assert!(matches!(
-      slot_outcome(&has, &has_false, &store),
+      judge(&has, &has_false, &store),
       AssayOutcome::EvalError { .. }
     ));
     let has_none = json!({"kind": "hasAttrs", "primary": {"oops": true}});
     assert!(matches!(
-      slot_outcome(&has, &has_none, &store),
+      judge(&has, &has_none, &store),
       AssayOutcome::EvalError { .. }
     ));
 
@@ -863,7 +876,7 @@ mod tests {
     );
     let snap_throw = json!({"kind": "snapshot", "primary": {"ok": false}});
     assert!(matches!(
-      slot_outcome(&snap, &snap_throw, &store),
+      judge(&snap, &snap_throw, &store),
       AssayOutcome::EvalError { .. }
     ));
   }
@@ -996,6 +1009,7 @@ mod tests {
       eval: Arc::new(eval),
       snapshots: SnapshotStore::new(PathBuf::from("/tmp/assay-batch-trace")),
       path_info: Arc::new(nixstore::MockPathInfoStore::default()),
+      fs: Arc::new(MemFs::default()),
     };
     let _ = run_test(run_batch(one_eq(), caps, trace));
     let notes = notes.lock().unwrap();

@@ -1,7 +1,12 @@
-//! Discover assay suite files under a directory tree.
+//! Discover assay suite files under a directory tree (through the [`Fs`] capability).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use id_effect::{Concurrency, Effect, all, need, succeed};
+
+use crate::caps::{FsEnv, FsService};
+use crate::files::{EntryKind, Fs, reword_io};
 use crate::verdict::InfraError;
 
 /// A discovered suite file and its kind.
@@ -19,21 +24,26 @@ pub enum SuiteKind {
   AssayNix,
 }
 
-/// Walk `root` recursively and collect known suite file patterns.
-pub fn discover_suites(root: &Path) -> Result<Vec<SuiteFile>, InfraError> {
-  let mut suites = Vec::new();
-  if root.is_file() {
-    if let Some(kind) = suite_kind(root) {
-      suites.push(SuiteFile {
-        path: root.to_path_buf(),
-        kind,
-      });
+/// [`discover_suites`] with the filesystem from [`FsEnv`].
+pub fn discover(root: &Path) -> Effect<Vec<SuiteFile>, InfraError, FsEnv> {
+  let root = root.to_path_buf();
+  need::<FsService>().flat_map(move |fs: Arc<FsService>| discover_suites(&fs.0, &root).any_env())
+}
+
+/// The suite files at `root`: `root` itself when it is a suite file, else every suite file
+/// under it (recursively, skipping caches / VCS / build outputs), sorted by path.
+pub fn discover_suites(fs: &Arc<dyn Fs>, root: &Path) -> Effect<Vec<SuiteFile>, InfraError> {
+  let (fs, root) = (Arc::clone(fs), root.to_path_buf());
+  fs.kind(&root).flat_map(move |kind| {
+    if kind == Some(EntryKind::File) {
+      let suite = suite_kind(&root).map(|kind| SuiteFile { path: root, kind });
+      return succeed(suite.into_iter().collect());
     }
-    return Ok(suites);
-  }
-  walk_dir(root, &mut suites)?;
-  suites.sort_by(|a, b| a.path.cmp(&b.path));
-  Ok(suites)
+    walk_dir(fs, root).map(|mut suites| {
+      suites.sort_by(|a, b| a.path.cmp(&b.path));
+      suites
+    })
+  })
 }
 
 /// Classify a single path as a suite file, if it matches a known pattern.
@@ -57,22 +67,35 @@ pub fn suite_kind(path: &Path) -> Option<SuiteKind> {
   None
 }
 
-fn walk_dir(dir: &Path, suites: &mut Vec<SuiteFile>) -> Result<(), InfraError> {
-  let read_err = |e: std::io::Error| InfraError::Io(format!("read dir {}: {e}", dir.display()));
-  for entry in std::fs::read_dir(dir).map_err(read_err)? {
-    let entry = entry.map_err(read_err)?;
-    let path = entry.path();
-    if path.is_dir() {
-      let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-      if should_skip_dir(name) {
-        continue;
+/// The suite files under `dir` (unsorted).
+fn walk_dir(fs: Arc<dyn Fs>, dir: PathBuf) -> Effect<Vec<SuiteFile>, InfraError> {
+  fs.read_dir(&dir)
+    .map_err(|e| reword_io(e, |m| InfraError::Io(format!("read dir {m}"))))
+    .flat_map(move |entries| {
+      let mut suites = Vec::new();
+      let mut subdirs = Vec::new();
+      for entry in entries {
+        if entry.is_dir {
+          let name = entry
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+          if !should_skip_dir(name) {
+            subdirs.push(walk_dir(Arc::clone(&fs), entry.path));
+          }
+        } else if let Some(kind) = suite_kind(&entry.path) {
+          suites.push(SuiteFile {
+            path: entry.path,
+            kind,
+          });
+        }
       }
-      walk_dir(&path, suites)?;
-    } else if let Some(kind) = suite_kind(&path) {
-      suites.push(SuiteFile { path, kind });
-    }
-  }
-  Ok(())
+      all(subdirs, Concurrency::Sequential).map(move |nested| {
+        suites.extend(nested.into_iter().flatten());
+        suites
+      })
+    })
 }
 
 /// Directories excluded from whole-repo discovery (caches, VCS, build outputs).
@@ -103,14 +126,18 @@ fn is_fixtures_compat_child(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-  use super::*;
-  use std::fs;
+  use id_effect::{Layer, expect_exit_failure, expect_exit_success, hlist, run_test};
 
-  fn write_file(path: &Path, contents: &str) {
-    if let Some(parent) = path.parent() {
-      fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(path, contents).unwrap();
+  use super::*;
+  use crate::fake::MemFs;
+
+  fn discover_in(files: &[&str], root: &str) -> Vec<SuiteFile> {
+    let fs: Arc<dyn Fs> = Arc::new(MemFs::with_files(files.iter().map(|f| (*f, "#"))));
+    expect_exit_success(run_test(discover_suites(&fs, Path::new(root))))
+  }
+
+  fn paths(found: &[SuiteFile]) -> Vec<String> {
+    found.iter().map(|s| s.path.display().to_string()).collect()
   }
 
   #[test]
@@ -144,76 +171,78 @@ mod tests {
 
   #[test]
   fn discover_skips_nested_git_and_node_modules() {
-    let root = std::env::temp_dir().join(format!("assay_discover_skip_{}", std::process::id()));
-    fs::remove_dir_all(&root).ok();
-    write_file(&root.join("keep/demo.assay.nix"), "#");
-    write_file(&root.join(".git/hidden.assay.nix"), "#");
-    write_file(&root.join("node_modules/pkg/hidden.assay.nix"), "#");
-    write_file(&root.join("target/hidden.assay.nix"), "#");
-
-    let found = discover_suites(&root).expect("discover");
-    assert_eq!(found.len(), 1);
-    assert!(found[0].path.ends_with("keep/demo.assay.nix"));
-
-    fs::remove_dir_all(&root).ok();
+    let found = discover_in(
+      &[
+        "/r/keep/demo.assay.nix",
+        "/r/.git/hidden.assay.nix",
+        "/r/node_modules/pkg/hidden.assay.nix",
+        "/r/target/hidden.assay.nix",
+      ],
+      "/r",
+    );
+    assert_eq!(paths(&found), ["/r/keep/demo.assay.nix"]);
   }
 
   #[test]
-  fn discover_suites_finds_nested_files() {
-    let root = std::env::temp_dir().join(format!("assay_discover_{}", std::process::id()));
-    fs::remove_dir_all(&root).ok();
-    write_file(&root.join("fixtures/compat/one.json"), "{}");
-    write_file(&root.join("fixtures/compat/two.nix"), "{}");
-    write_file(&root.join("deep/suite.json"), "{}");
-    write_file(&root.join("cases/demo.assay.nix"), "#");
-    write_file(&root.join("junk/readme.txt"), "skip");
-
-    let found = discover_suites(&root).expect("discover");
-    assert_eq!(found.len(), 4);
-    assert!(found.iter().any(|s| s.kind == SuiteKind::CompatJson));
-    assert!(found.iter().any(|s| s.kind == SuiteKind::CompatNix));
-    assert!(found.iter().any(|s| s.kind == SuiteKind::AssayNix));
-
-    fs::remove_dir_all(&root).ok();
+  fn discover_suites_finds_nested_files_sorted() {
+    let found = discover_in(
+      &[
+        "/r/fixtures/compat/two.nix",
+        "/r/fixtures/compat/one.json",
+        "/r/deep/suite.json",
+        "/r/cases/demo.assay.nix",
+        "/r/junk/readme.txt",
+      ],
+      "/r",
+    );
+    assert_eq!(
+      found,
+      [
+        SuiteFile {
+          path: "/r/cases/demo.assay.nix".into(),
+          kind: SuiteKind::AssayNix
+        },
+        SuiteFile {
+          path: "/r/deep/suite.json".into(),
+          kind: SuiteKind::CompatJson
+        },
+        SuiteFile {
+          path: "/r/fixtures/compat/one.json".into(),
+          kind: SuiteKind::CompatJson
+        },
+        SuiteFile {
+          path: "/r/fixtures/compat/two.nix".into(),
+          kind: SuiteKind::CompatNix
+        },
+      ]
+    );
   }
 
   #[test]
-  fn write_file_without_parent_component() {
-    let filename = format!("assay_discover_bare_{}.txt", std::process::id());
-    let path = Path::new(&filename);
-    write_file(path, "x");
-    assert!(path.exists());
-    fs::remove_file(path).ok();
+  fn discover_single_files() {
+    assert!(discover_in(&["/d/notsuite.txt"], "/d/notsuite.txt").is_empty());
+    let json = discover_in(&["/d/suite.json"], "/d/suite.json");
+    assert_eq!(json.len(), 1);
+    assert_eq!(json[0].kind, SuiteKind::CompatJson);
+    let assay = discover_in(&["/d/x.assay.nix"], "/d/x.assay.nix");
+    assert_eq!(assay[0].kind, SuiteKind::AssayNix);
   }
 
   #[test]
-  fn discover_non_suite_file_returns_empty() {
-    let path = std::env::temp_dir().join(format!("assay_notsuite_{}.txt", std::process::id()));
-    fs::write(&path, "x").unwrap();
-    let found = discover_suites(&path).expect("discover");
-    assert!(found.is_empty());
-    fs::remove_file(&path).ok();
+  fn discover_missing_root_is_a_read_dir_error() {
+    let fs: Arc<dyn Fs> = Arc::new(MemFs::default());
+    let err = expect_exit_failure(run_test(discover_suites(&fs, Path::new("/nope"))));
+    assert_eq!(
+      err,
+      InfraError::Io("read dir /nope: not a directory".into())
+    );
   }
 
   #[test]
-  fn discover_single_compat_json_file() {
-    let dir = std::env::temp_dir().join(format!("assay_single_json_{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("suite.json");
-    fs::write(&path, "{}").unwrap();
-    let found = discover_suites(&path).expect("discover");
-    assert_eq!(found.len(), 1);
-    assert_eq!(found[0].kind, SuiteKind::CompatJson);
-    fs::remove_dir_all(&dir).ok();
-  }
-
-  #[test]
-  fn discover_single_assay_nix_file() {
-    let path = std::env::temp_dir().join(format!("assay_single_{}.assay.nix", std::process::id()));
-    fs::write(&path, "#").unwrap();
-    let found = discover_suites(&path).expect("discover");
-    assert_eq!(found.len(), 1);
-    assert_eq!(found[0].kind, SuiteKind::AssayNix);
-    fs::remove_file(&path).ok();
+  fn discover_reads_the_fs_from_its_env() {
+    let fs = MemFs::with_files([("/r/a.assay.nix", "#")]);
+    let layer = Layer::<FsEnv, InfraError>::succeed(hlist![FsService(Arc::new(fs))]);
+    let found = expect_exit_success(run_test(discover(Path::new("/r")).provide_layer(layer)));
+    assert_eq!(paths(&found), ["/r/a.assay.nix"]);
   }
 }

@@ -12,9 +12,11 @@ use id_effect::{Effect, fail, need, succeed, sync};
 use nixstore::PathInfoStore;
 
 use crate::caps::{
-  AssayEnv, EvalEnv, NixEvalService, PathInfoEnv, PathInfoService, SnapshotEnv, SnapshotService,
+  AssayEnv, EvalEnv, FsService, NixEvalService, PathInfoEnv, PathInfoService, SnapshotEnv,
+  SnapshotService,
 };
 use crate::eval::NixEval;
+use crate::files::Fs;
 use crate::force::check_forces;
 use crate::outcome::AssayOutcome;
 use crate::snapshot::SnapshotStore;
@@ -103,16 +105,21 @@ pub struct ClaimCaps {
   pub eval: Arc<dyn NixEval>,
   pub snapshots: SnapshotStore,
   pub path_info: Arc<dyn PathInfoStore>,
+  /// Snapshot goldens (and, for a run, suite files and discovery).
+  pub fs: Arc<dyn Fs>,
 }
 
 /// Reads the [`ClaimCaps`] out of [`AssayEnv`] (nothing is opened or spawned here).
 pub fn claim_caps() -> Effect<ClaimCaps, InfraError, AssayEnv> {
   need::<NixEvalService>().flat_map(|eval: Arc<NixEvalService>| {
     need::<SnapshotService>().flat_map(move |snapshots: Arc<SnapshotService>| {
-      need::<PathInfoService>().map(move |path_info: Arc<PathInfoService>| ClaimCaps {
-        eval: Arc::clone(&eval.0),
-        snapshots: snapshots.0.clone(),
-        path_info: Arc::clone(&path_info.0),
+      need::<PathInfoService>().flat_map(move |path_info: Arc<PathInfoService>| {
+        need::<FsService>().map(move |fs: Arc<FsService>| ClaimCaps {
+          eval: Arc::clone(&eval.0),
+          snapshots: snapshots.0.clone(),
+          path_info: Arc::clone(&path_info.0),
+          fs: Arc::clone(&fs.0),
+        })
       })
     })
   })
@@ -135,9 +142,11 @@ pub fn eval_claim(claim: Claim) -> Effect<CaseVerdict, InfraError, EvalEnv> {
 pub fn snapshot_claim(name: String, expr: String) -> Effect<CaseVerdict, InfraError, SnapshotEnv> {
   need::<NixEvalService>().flat_map(move |eval: Arc<NixEvalService>| {
     need::<SnapshotService>().flat_map(move |snapshots: Arc<SnapshotService>| {
-      interpret_snapshot(&eval.0, snapshots.0.clone(), name, &expr)
-        .flat_map(outcome_to_effect)
-        .any_env()
+      need::<FsService>().flat_map(move |fs: Arc<FsService>| {
+        interpret_snapshot(&eval.0, &fs.0, snapshots.0.clone(), name, &expr)
+          .flat_map(outcome_to_effect)
+          .any_env()
+      })
     })
   })
 }
@@ -161,7 +170,7 @@ pub fn path_info_claim(
 pub fn interpret_with(caps: &ClaimCaps, claim: Claim) -> Effect<CaseVerdict, InfraError> {
   interpret_outcome(
     &caps.eval,
-    Some(&caps.snapshots),
+    Some((&caps.snapshots, &caps.fs)),
     Some(&caps.path_info),
     claim,
   )
@@ -171,7 +180,7 @@ pub fn interpret_with(caps: &ClaimCaps, claim: Claim) -> Effect<CaseVerdict, Inf
 /// runner error.
 fn interpret_outcome(
   eval: &Arc<dyn NixEval>,
-  snapshots: Option<&SnapshotStore>,
+  snapshots: Option<(&SnapshotStore, &Arc<dyn Fs>)>,
   path_info: Option<&Arc<dyn PathInfoStore>>,
   claim: Claim,
 ) -> Effect<CaseVerdict, InfraError> {
@@ -211,7 +220,7 @@ fn interpret_outcome(
       expected,
     } => pure(move || interpret_drv_values(&actual, &project, &expected)),
     Claim::Snapshot { name, expr } => match snapshots {
-      Some(store) => interpret_snapshot(eval, store.clone(), name, &expr),
+      Some((store, fs)) => interpret_snapshot(eval, fs, store.clone(), name, &expr),
       None => fail(missing_capability("snapshot", "SnapshotService")),
     },
     Claim::Forces { expr, paths } => pure(move || check_forces(&expr, &paths)),
@@ -448,13 +457,20 @@ fn interpret_path_info(
 
 fn interpret_snapshot(
   eval: &Arc<dyn NixEval>,
+  fs: &Arc<dyn Fs>,
   store: SnapshotStore,
   name: String,
   expr: &str,
 ) -> Effect<AssayOutcome, InfraError> {
-  eval_then(eval, expr, move |v| {
-    store.assert_match(&name, &normalize_value(&v), store.update_snapshots)
-  })
+  let fs = Arc::clone(fs);
+  eval
+    .eval_expr(expr)
+    .map(Ok)
+    .catch(|failed| succeed(Err(failed)))
+    .flat_map(move |evaluated| match evaluated {
+      Ok(v) => store.assert_match(&fs, &name, normalize_value(&v), store.update_snapshots),
+      Err(outcome) => succeed(outcome),
+    })
 }
 
 fn is_throw_outcome(out: &AssayOutcome) -> bool {

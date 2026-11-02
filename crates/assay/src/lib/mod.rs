@@ -1,8 +1,9 @@
 //! Assay — Nix unit testing framework (claim algebra + isolated eval runner).
 //!
-//! All `nix` evaluation goes through the [`NixEval`] capability and store path-info through
-//! [`PathInfoService`] ([`caps`]; live adapters in [`live`]). A run is one effect over
-//! [`AssayEnv`] ([`run`]); its typed [`SuiteReport`] is rendered at the edge ([`report`]).
+//! All `nix` evaluation goes through the [`NixEval`] capability, store path-info through
+//! [`PathInfoService`] and file access through [`Fs`] ([`caps`]; live adapters in [`live`]). A
+//! run is one effect over [`AssayEnv`] ([`run`]); its typed [`SuiteReport`] is rendered at the
+//! edge ([`report`]). Suites decode through derived schemas ([`schema`]).
 
 #![forbid(unsafe_code)]
 
@@ -15,6 +16,7 @@ pub mod discover;
 pub mod eval;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
+pub mod files;
 pub mod force;
 pub mod laws;
 pub mod live;
@@ -28,27 +30,32 @@ pub mod snapshot;
 pub mod verdict;
 
 pub use caps::{
-  AssayEnv, EvalEnv, FakeStore, NixEvalService, PathInfoEnv, PathInfoService, SnapshotEnv,
-  SnapshotService, default_snapshot_root, layer, layer_from, require_store, store_root_from,
+  AssayEnv, EvalEnv, FakeStore, FsEnv, FsService, NixEvalService, PathInfoEnv, PathInfoService,
+  SnapshotEnv, SnapshotService, SuiteEnv, default_snapshot_root, fs_layer, layer, layer_from,
+  require_store, store_root_from,
 };
 pub use claims::{
   Claim, ClaimCaps, build_module_eval_expr, claim_caps, eval_claim, interpret_claim,
   interpret_with, path_info_claim, snapshot_claim,
 };
 pub use compat::{CompatCase, CompatSuite, load_compat_suite};
-pub use discover::{SuiteFile, discover_suites};
+pub use discover::{SuiteFile, discover, discover_suites};
 pub use eval::{EvalResult, NixEval};
 #[cfg(any(test, feature = "test-support"))]
-pub use fake::{MockNixEval, SyncEval, fake_layer, temp_snapshot_store};
+pub use fake::{MemFs, MockNixEval, SyncEval, fake_layer, fake_layer_with_fs, temp_snapshot_store};
+pub use files::{DirEntry, EntryKind, Fs};
 pub use id_effect::Exit;
 pub use laws::{run_builtin_laws, run_law_by_name};
-pub use live::{LazyPathInfoStore, LiveNixEval};
+pub use live::{LazyPathInfoStore, LiveFs, LiveNixEval};
 pub use outcome::{AssayOutcome, run_case};
 pub use report::{ReportFormat, render_report};
 pub use run::{
-  RunOptions, RunSummary, SuiteReport, Trace, default_jobs, run_discovered, run_suite, summarize,
+  RunOptions, RunSummary, SuiteReport, Trace, default_jobs, load_suite, load_suite_cases,
+  run_discovered, run_path, run_suite, summarize,
 };
-pub use schema::{decode_claim_json, decode_suite_cases, encode_claim_json};
+pub use schema::{
+  decode_claim_json, decode_compat_cases, decode_suite, describe_issues, encode_claim_json,
+};
 pub use snapshot::SnapshotStore;
 pub use verdict::{CaseVerdict, InfraError, case_exit_byte, exit_to_outcome, outcome_to_exit};
 

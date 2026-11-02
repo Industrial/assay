@@ -2,20 +2,26 @@
 //!
 //! [`SyncEval`] is a scripted evaluator: implement `eval_json` (and optionally the file / source
 //! variants) and it is a [`NixEval`]. Its effects are built from the scripted answer when the
-//! call is made, so a retried effect asks the script again per attempt.
+//! call is made, so a retried effect asks the script again per attempt. [`MemFs`] is an
+//! in-memory [`Fs`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use id_effect::{Effect, Layer};
+use id_effect::{Effect, Layer, suspend, sync};
+use nixstore::edge::from_result;
 use serde_json::Value;
 
-use crate::caps::{AssayEnv, NixEvalService, PathInfoService, SnapshotService, layer_from};
+use crate::caps::{
+  AssayEnv, FsService, NixEvalService, PathInfoService, SnapshotService, layer_from,
+};
 use crate::eval::{EvalResult, NixEval};
+use crate::files::{DirEntry, EntryKind, Fs};
 use crate::outcome::AssayOutcome;
 use crate::snapshot::SnapshotStore;
+use crate::verdict::InfraError;
 
 /// A scripted, synchronous evaluator.
 pub trait SyncEval: Send + Sync {
@@ -158,12 +164,117 @@ pub fn temp_snapshot_store() -> SnapshotStore {
   )
 }
 
-/// [`AssayEnv`] over `eval`, a [`temp_snapshot_store`] and an empty in-memory path-info store.
+/// An in-memory filesystem: text files by path; directories are implied by the files under
+/// them. Each effect reads the state when it runs.
+#[derive(Default, Clone)]
+pub struct MemFs {
+  files: Arc<Mutex<BTreeMap<PathBuf, String>>>,
+}
+
+impl MemFs {
+  /// A filesystem holding `files`.
+  pub fn with_files<P: Into<PathBuf>, S: Into<String>>(
+    files: impl IntoIterator<Item = (P, S)>,
+  ) -> Self {
+    let fs = Self::default();
+    fs.lock()
+      .extend(files.into_iter().map(|(p, s)| (p.into(), s.into())));
+    fs
+  }
+
+  /// The text of the file at `path`, if any.
+  pub fn file(&self, path: impl AsRef<Path>) -> Option<String> {
+    self.lock().get(path.as_ref()).cloned()
+  }
+
+  fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<PathBuf, String>> {
+    self.files.lock().unwrap_or_else(PoisonError::into_inner)
+  }
+
+  fn kind_of(&self, path: &Path) -> Option<EntryKind> {
+    let files = self.lock();
+    if files.contains_key(path) {
+      Some(EntryKind::File)
+    } else if files.keys().any(|f| f != path && f.starts_with(path)) {
+      Some(EntryKind::Dir)
+    } else {
+      None
+    }
+  }
+
+  fn list(&self, dir: &Path) -> Result<Vec<DirEntry>, InfraError> {
+    if self.kind_of(dir) != Some(EntryKind::Dir) {
+      return Err(InfraError::Io(format!(
+        "{}: not a directory",
+        dir.display()
+      )));
+    }
+    // Child path -> whether it is a directory.
+    let mut children = BTreeMap::new();
+    for file in self.lock().keys() {
+      let Ok(rel) = file.strip_prefix(dir) else {
+        continue;
+      };
+      let mut parts = rel.components();
+      if let Some(first) = parts.next() {
+        let is_dir = parts.next().is_some();
+        *children.entry(dir.join(first)).or_insert(false) |= is_dir;
+      }
+    }
+    Ok(
+      children
+        .into_iter()
+        .map(|(path, is_dir)| DirEntry { path, is_dir })
+        .collect(),
+    )
+  }
+}
+
+impl Fs for MemFs {
+  fn read_text(&self, path: &Path) -> Effect<String, InfraError> {
+    let (fs, path) = (self.clone(), path.to_path_buf());
+    suspend(move || {
+      from_result(
+        fs.file(&path)
+          .ok_or_else(|| InfraError::Io(format!("{}: not found", path.display()))),
+      )
+    })
+  }
+
+  fn write_text(&self, path: &Path, text: String) -> Effect<(), InfraError> {
+    let (fs, path) = (self.clone(), path.to_path_buf());
+    sync(move || {
+      fs.lock().insert(path, text);
+    })
+  }
+
+  fn kind(&self, path: &Path) -> Effect<Option<EntryKind>, InfraError> {
+    let (fs, path) = (self.clone(), path.to_path_buf());
+    sync(move || fs.kind_of(&path))
+  }
+
+  fn read_dir(&self, path: &Path) -> Effect<Vec<DirEntry>, InfraError> {
+    let (fs, path) = (self.clone(), path.to_path_buf());
+    suspend(move || from_result(fs.list(&path)))
+  }
+}
+
+/// [`AssayEnv`] over `eval`, a [`temp_snapshot_store`], an empty in-memory path-info store and
+/// an empty [`MemFs`].
 pub fn fake_layer<E: Send + 'static>(eval: impl NixEval + 'static) -> Layer<AssayEnv, E> {
+  fake_layer_with_fs(eval, MemFs::default())
+}
+
+/// [`fake_layer`] over the filesystem `fs`.
+pub fn fake_layer_with_fs<E: Send + 'static>(
+  eval: impl NixEval + 'static,
+  fs: impl Fs + 'static,
+) -> Layer<AssayEnv, E> {
   layer_from(
     NixEvalService(Arc::new(eval)),
     SnapshotService(temp_snapshot_store()),
     PathInfoService(Arc::new(nixstore::MockPathInfoStore::default())),
+    FsService(Arc::new(fs)),
   )
 }
 

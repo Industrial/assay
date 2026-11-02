@@ -39,6 +39,8 @@ nix_case!(run_mixed_json, ["run", MIXED, "--json"], exit: 1, golden: true);
 nix_case!(run_load_error, ["run", "tests/fixtures/load-error.assay.nix"], exit: 1, golden: false);
 
 bin_case!(run_missing_path, ["run", "/nonexistent"], stdin: None, exit: 1, golden: true);
+// A malformed JSON suite is a load error (every decode issue goes to stderr).
+bin_case!(run_malformed_suite, ["run", "tests/fixtures/malformed.assay.json"], stdin: None, exit: 1, golden: false);
 bin_case!(discover_dsl_tests, ["discover", "../../nix/assay/tests"], stdin: None, exit: 0, golden: true);
 bin_case!(laws_seed_1, ["laws", "--seed", "1"], stdin: None, exit: 0, golden: true);
 bin_case!(laws_seed_1_json, ["laws", "--seed", "1", "--json"], stdin: None, exit: 0, golden: true);

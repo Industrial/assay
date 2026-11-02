@@ -1,10 +1,11 @@
-//! assay's capabilities: Nix evaluation, the snapshot store and store path-info, their
-//! newtypes, environment aliases and the live layer.
+//! assay's capabilities: Nix evaluation, the snapshot store, store path-info and the
+//! filesystem, their newtypes, environment aliases and the live layer.
 //!
 //! Each claim kind needs only part of [`AssayEnv`]: `eq` / `throws` / `subset` / `hasAttrs` /
 //! `drv` / `module` / `forces` need [`EvalEnv`], `snapshot` needs [`SnapshotEnv`], `pathInfo`
-//! needs [`PathInfoEnv`]; value claims, laws and props need nothing. Live adapters are in
-//! [`live`](crate::live); the fakes behind `cfg(test)` / `test-support` in `fake`.
+//! needs [`PathInfoEnv`]; value claims, laws and props need nothing. Loading a suite needs
+//! [`SuiteEnv`], discovering suites [`FsEnv`]. Live adapters are in [`live`](crate::live); the
+//! fakes behind `cfg(test)` / `test-support` in `fake`.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -14,7 +15,8 @@ use id_effect::{Layer, caps, hlist};
 pub use nixstore::PathInfoService;
 
 use crate::eval::NixEval;
-use crate::live::{LazyPathInfoStore, LiveNixEval};
+use crate::files::Fs;
+use crate::live::{LazyPathInfoStore, LiveFs, LiveNixEval};
 use crate::outcome::AssayOutcome;
 use crate::snapshot::SnapshotStore;
 
@@ -26,14 +28,22 @@ pub struct NixEvalService(pub Arc<dyn NixEval>);
 #[derive(Clone)]
 pub struct SnapshotService(pub SnapshotStore);
 
+/// The filesystem (`~FsService`): suite files, the discover walk, snapshot goldens.
+#[derive(Clone)]
+pub struct FsService(pub Arc<dyn Fs>);
+
 /// What claims that evaluate Nix need.
 pub type EvalEnv = caps!(NixEvalService);
 /// What `snapshot` claims need.
-pub type SnapshotEnv = caps!(NixEvalService, SnapshotService);
+pub type SnapshotEnv = caps!(NixEvalService, SnapshotService, FsService);
 /// What `pathInfo` claims need.
 pub type PathInfoEnv = caps!(PathInfoService);
+/// What discovering suite files needs.
+pub type FsEnv = caps!(FsService);
+/// What loading a suite needs (`.nix` suites are evaluated, `.json` ones read).
+pub type SuiteEnv = caps!(NixEvalService, FsService);
 /// Every assay capability: what a run needs (and [`layer`] provides).
-pub type AssayEnv = caps!(NixEvalService, SnapshotService, PathInfoService);
+pub type AssayEnv = caps!(NixEvalService, SnapshotService, PathInfoService, FsService);
 
 /// Where goldens live: `testdata/goldens/` of this crate.
 pub fn default_snapshot_root() -> PathBuf {
@@ -46,9 +56,9 @@ pub fn store_root_from(assay_nix_store: Option<OsString>) -> PathBuf {
   assay_nix_store.map_or_else(|| PathBuf::from("/nix"), PathBuf::from)
 }
 
-/// The live layer: `nix` on PATH, `snapshots`, and the store database under `store_root`
-/// (opened on the first `pathInfo` query, see [`LazyPathInfoStore`]). `E` is the error of the
-/// graph it joins; building it never fails.
+/// The live layer: `nix` on PATH, `snapshots`, the store database under `store_root` (opened
+/// on the first `pathInfo` query, see [`LazyPathInfoStore`]) and the local filesystem. `E` is
+/// the error of the graph it joins; building it never fails.
 pub fn layer<E>(store_root: PathBuf, snapshots: SnapshotStore) -> Layer<AssayEnv, E>
 where
   E: Send + 'static,
@@ -57,6 +67,7 @@ where
     NixEvalService(Arc::new(LiveNixEval)),
     SnapshotService(snapshots),
     PathInfoService(Arc::new(LazyPathInfoStore::new(store_root))),
+    FsService(Arc::new(LiveFs)),
   )
 }
 
@@ -65,11 +76,20 @@ pub fn layer_from<E>(
   eval: NixEvalService,
   snapshots: SnapshotService,
   path_info: PathInfoService,
+  fs: FsService,
 ) -> Layer<AssayEnv, E>
 where
   E: Send + 'static,
 {
-  Layer::succeed(hlist![eval, snapshots, path_info])
+  Layer::succeed(hlist![eval, snapshots, path_info, fs])
+}
+
+/// The live filesystem alone (what `assay discover` needs).
+pub fn fs_layer<E>() -> Layer<FsEnv, E>
+where
+  E: Send + 'static,
+{
+  Layer::succeed(hlist![FsService(Arc::new(LiveFs))])
 }
 
 /// Marker for an in-memory / fake nix store used in sandboxed module tests.

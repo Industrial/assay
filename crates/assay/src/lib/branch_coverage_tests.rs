@@ -9,7 +9,7 @@ use crate::assay_suite::parse_assay_suite;
 use crate::claims::Claim;
 use crate::discover::{SuiteKind, discover_suites, suite_kind};
 use crate::eval::{EvalResult, NixEval, classify_stderr};
-use crate::fake::{MockNixEval, SyncEval, fake_layer};
+use crate::fake::{MemFs, MockNixEval, SyncEval, fake_layer_with_fs};
 use crate::laws::{law_merge_associativity, run_law_by_name};
 use crate::live::LiveNixEval;
 use crate::outcome::AssayOutcome;
@@ -133,11 +133,13 @@ fn discover_assay_json_and_unknown_single_file() {
     suite_kind(PathBuf::from("x.assay.json").as_path()),
     Some(SuiteKind::AssayNix)
   );
-  let unknown = std::env::temp_dir().join(format!("assay_unknown_{}", std::process::id()));
-  std::fs::write(&unknown, "x").unwrap();
-  let found = discover_suites(&unknown).expect("discover");
+  let fs: std::sync::Arc<dyn crate::files::Fs> =
+    std::sync::Arc::new(MemFs::with_files([("/d/assay_unknown", "x")]));
+  let found = expect_exit_success(run_test(discover_suites(
+    &fs,
+    PathBuf::from("/d/assay_unknown").as_path(),
+  )));
   assert!(found.is_empty());
-  let _ = std::fs::remove_file(unknown);
 }
 
 #[test]
@@ -170,12 +172,9 @@ fn schema_value_mode_roundtrip() {
 
 #[test]
 fn run_suite_blocking_update_snapshots_and_summarize() {
-  let dir = std::env::temp_dir().join(format!("assay_run_blk_{}", std::process::id()));
-  std::fs::create_dir_all(&dir).unwrap();
-  let path = dir.join("suite.json");
-  std::fs::write(&path, r#"{"ok":{"expr":"1","expected":"1"}}"#).unwrap();
+  let fs = MemFs::with_files([("/s/suite.json", r#"{"ok":{"expr":"1","expected":"1"}}"#)]);
   let run = run_suite(
-    &path,
+    std::path::Path::new("/s/suite.json"),
     &RunOptions {
       update_snapshots: true,
       batch_eval: false,
@@ -183,13 +182,12 @@ fn run_suite_blocking_update_snapshots_and_summarize() {
       ..RunOptions::default()
     },
   )
-  .provide_layer(fake_layer::<InfraError>(MockNixEval::default()));
+  .provide_layer(fake_layer_with_fs::<InfraError>(MockNixEval::default(), fs));
   let report = expect_exit_success(run_test(run));
   assert_eq!(report.outcomes.len(), 1);
   let summary = summarize(&report);
   assert_eq!(summary.total, 1);
   assert_eq!(summary.passed, 1);
-  let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -361,14 +359,14 @@ fn schema_decode_expr_mode_and_throws_pattern() {
 }
 
 #[test]
-fn schema_decode_suite_cases_prefixes_errors() {
-  use crate::schema::decode_suite_cases;
-  assert!(
-    decode_suite_cases(&json!({
-        "bad": { "claim": "nope" }
-    }))
-    .is_err()
-  );
+fn schema_decode_suite_prefixes_errors() {
+  use crate::schema::decode_suite;
+  let errors = decode_suite(&json!({
+      "cases": { "bad": { "claim": "nope" } }
+  }))
+  .expect_err("invalid");
+  assert_eq!(errors.issues.len(), 1);
+  assert_eq!(errors.issues[0].path, "cases.bad.claim");
 }
 
 #[test]

@@ -32,6 +32,7 @@ fn run_batch_sync(
     eval: Arc::new(eval),
     snapshots: store.clone(),
     path_info: Arc::new(nixstore::MockPathInfoStore::default()),
+    fs: Arc::new(crate::fake::MemFs::default()),
   };
   run_test(run_batch(cases.to_vec(), caps, Trace::default()))
     .into_result()
