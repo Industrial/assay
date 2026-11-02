@@ -1,5 +1,7 @@
 {
   inputs,
+  config,
+  lib,
   pkgs,
   ...
 }: {
@@ -47,6 +49,13 @@
     RUST_BACKTRACE = "1";
     RUSTC_WRAPPER = "sccache";
   };
+
+  # packages-rust-dev also ships nixpkgs rustc/clippy/rustfmt, which shadow the
+  # rust-overlay toolchain on PATH. id_effect 0.13 needs rustc >= 1.94, so put the
+  # languages.rust toolchain first.
+  enterShell = lib.mkAfter ''
+    export PATH="${config.languages.rust.toolchainPackage}/bin:$PATH"
+  '';
 
   # Project-only packages (beads removed upstream in favor of Maestro).
   packages = [
