@@ -59,15 +59,31 @@ pub fn run_main_coded<E>(program: Effect<u8, E>, fail_code: u8) -> ExitCode
 where
   E: fmt::Debug + Send + 'static,
 {
+  run_main_coded_by(program, move |_| fail_code)
+}
+
+/// [`run_main_coded`] whose typed-failure exit code depends on the error: `Fail(e)` exits
+/// `fail_code(&e)` (e.g. 1 for a hash mismatch, 2 for everything else). Defect 101 and
+/// interrupt 130 are unchanged.
+pub fn run_main_coded_by<E>(
+  program: Effect<u8, E>,
+  fail_code: impl FnOnce(&E) -> u8 + Send + 'static,
+) -> ExitCode
+where
+  E: fmt::Debug + Send + 'static,
+{
   let code = Arc::new(AtomicU8::new(0));
-  let seen = Arc::clone(&code);
-  let program = program.map(move |c| seen.store(c, Ordering::SeqCst));
+  let (on_success, on_failure) = (Arc::clone(&code), Arc::clone(&code));
+  let program = program
+    .map(move |c| on_success.store(c, Ordering::SeqCst))
+    .map_err(move |e| {
+      on_failure.store(fail_code(&e), Ordering::SeqCst);
+      e
+    });
   let exit = run_main(program, HNil, RunMainConfig::minimal());
-  if exit == ExitCode::SUCCESS {
+  // `run_main` maps every typed failure (and only those) to 1; `code` then holds its code.
+  if exit == ExitCode::SUCCESS || exit == ExitCode::from(1) {
     ExitCode::from(code.load(Ordering::SeqCst))
-  } else if exit == ExitCode::from(1) {
-    // `run_main` maps every typed failure (and only those) to 1.
-    ExitCode::from(fail_code)
   } else {
     exit
   }
@@ -113,6 +129,27 @@ mod tests {
     );
     assert_eq!(
       run_main_coded(die::<u8, String, HNil>("bug"), 2),
+      ExitCode::from(101)
+    );
+  }
+
+  #[test]
+  fn run_main_coded_by_picks_the_code_from_the_error() {
+    let code = |e: &String| if e == "mismatch" { 1 } else { 2 };
+    assert_eq!(
+      run_main_coded_by(fail::<u8, String, HNil>("mismatch".into()), code),
+      ExitCode::from(1)
+    );
+    assert_eq!(
+      run_main_coded_by(fail::<u8, String, HNil>("io".into()), code),
+      ExitCode::from(2)
+    );
+    assert_eq!(
+      run_main_coded_by(succeed::<u8, String, HNil>(0), code),
+      ExitCode::SUCCESS
+    );
+    assert_eq!(
+      run_main_coded_by(die::<u8, String, HNil>("bug"), code),
       ExitCode::from(101)
     );
   }

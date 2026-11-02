@@ -30,8 +30,8 @@ pub fn nix32_encode_bytes(data: &[u8]) -> String {
     }
     out.push(alphabet[(c & 0x1f) as usize]);
   }
-  // SAFETY: alphabet is ASCII
-  String::from_utf8(out).expect("nix alphabet is ascii")
+  // The alphabet is ASCII, so every byte is one char.
+  out.into_iter().map(char::from).collect()
 }
 
 /// Decode 52-char nix32 → 32-byte digest (inverse of [`nix32_encode_bytes`]).
@@ -192,5 +192,13 @@ mod tests {
   fn rejects_garbage() {
     assert!(parse_expected_hash("not-a-hash").is_err());
     assert!(parse_expected_hash("sha256-!!!").is_err());
+    assert!(
+      parse_expected_hash("sha256-YWJj").is_err(),
+      "SRI of 3 bytes"
+    );
+    assert!(nix32_decode_digest("abc").is_err());
+    let bad_char = format!("!{}", "0".repeat(51));
+    assert!(nix32_decode_digest(&bad_char).is_err());
+    assert_eq!(nix32_encode_bytes(&[1, 2, 3]).len(), 5);
   }
 }
