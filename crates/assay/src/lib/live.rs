@@ -6,7 +6,7 @@
 //!
 //! `run_main` polls the root fiber outside the tokio runtime context, while forked fibers (every
 //! parallel case, every timeout racer) run on tokio worker threads. So `nix` never runs inline in
-//! a fiber: the process future runs as a task on the fiber's executor ([`on_executor`]), where
+//! a fiber: the process future runs as a task on the fiber's executor (`on_executor`), where
 //! `tokio::process` has its runtime. Interrupting the effect (a case timeout, Ctrl-C) drops the
 //! future inside the task, which kills the `nix` child (`kill_on_drop`).
 

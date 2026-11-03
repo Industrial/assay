@@ -7,11 +7,11 @@
 //! context, while forked fibers (every `timeout` / `race` racer) run on tokio worker threads.
 //! So the adapters never do their I/O inline in the fiber:
 //!
-//! - network and subprocess futures run as a task on the fiber's executor ([`on_executor`]):
+//! - network and subprocess futures run as a task on the fiber's executor (`on_executor`):
 //!   on the default runtime that is tokio, whose context reqwest and `tokio::process` need.
 //!   Interrupting the effect (an attempt timeout, Ctrl-C) drops the future inside the task,
 //!   which closes the connection or kills the `git` child (`kill_on_drop`);
-//! - blocking `std::fs` calls run on the executor's blocking pool ([`blocking`]), so they never
+//! - blocking `std::fs` calls run on the executor's blocking pool (`blocking`), so they never
 //!   park an executor thread. On a `TestExecutor` they run as an ordinary task.
 
 // id_effect_lints: this is the I/O boundary. Its async helpers run only inside `on_executor`
