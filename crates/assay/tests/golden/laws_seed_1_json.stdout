@@ -1,0 +1,20 @@
+[
+  {
+    "name": "merge_identity",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "merge_associativity",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "merge_idempotent",
+    "outcome": {
+      "kind": "pass"
+    }
+  }
+]

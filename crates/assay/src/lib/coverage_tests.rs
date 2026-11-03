@@ -3,28 +3,50 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use id_effect::{Clock, Exit};
+use id_effect::{Cause, Exit, run_test};
 use serde_json::{Value, json};
 
-use crate::batch::{BATCH_MARKER, FORCE_BATCH_JSON_EVAL, is_batchable, partition_cases, run_batch};
-use crate::caps::{MockNixEval, StdClock};
-use crate::claims::Claim;
-use crate::eval::{EvalBackend, EvalResult};
+use crate::batch::{BATCH_MARKER, is_batchable, partition_cases, run_batch};
+use crate::claims::{Claim, ClaimCaps};
+use crate::eval::{EvalResult, NixEval};
+use crate::fake::{MockNixEval, SyncEval};
 use crate::outcome::AssayOutcome;
-use crate::pool::{NixWorkerPool, SemaphoreWorkerPool};
 use crate::prop::{BUILTIN_PROP_NAMES, Gen, run_prop_by_name};
-use crate::report::{ReportFormat, collect_formatted_lines, format_line, report_outcomes_stdout};
+use crate::report::{ReportFormat, collect_formatted_lines, format_line, render_report};
+use crate::run::Trace;
 use crate::run::{RunSummary, SuiteReport, summarize_exits};
 use crate::schema::{decode_claim_json, encode_claim_json};
 use crate::snapshot::SnapshotStore;
 use crate::verdict::{CaseVerdict, InfraError, exit_to_outcome, outcome_to_exit};
 use nixq::{fold_object_keys, value_contains_subset};
 
+type NamedExit = (String, Exit<CaseVerdict, InfraError>);
+
+/// `run_batch` over `eval` and `store`, run to completion.
+fn run_batch_sync(
+  cases: &[(String, Claim)],
+  eval: impl NixEval + 'static,
+  store: &SnapshotStore,
+) -> Result<Vec<NamedExit>, InfraError> {
+  let caps = ClaimCaps {
+    eval: Arc::new(eval),
+    snapshots: store.clone(),
+    path_info: Arc::new(nixstore::MockPathInfoStore::default()),
+    fs: Arc::new(crate::fake::MemFs::default()),
+  };
+  run_test(run_batch(cases.to_vec(), caps, Trace::default()))
+    .into_result()
+    .map_err(|c| match c {
+      Cause::Fail(e) => e,
+      other => InfraError::Worker(format!("{other:?}")),
+    })
+}
+
 struct BatchJsonEval {
   inner: MockNixEval,
 }
 
-impl EvalBackend for BatchJsonEval {
+impl SyncEval for BatchJsonEval {
   fn eval_json(&self, expr: &str) -> EvalResult {
     if expr.contains(BATCH_MARKER) {
       return self.batch_results(expr);
@@ -145,8 +167,7 @@ fn run_batch_mock_covers_eq_subset_hasattrs_snapshot() {
     ),
   ];
   let store = SnapshotStore::new(PathBuf::from("/tmp/assay-coverage-goldens"));
-  let eval = Arc::new(BatchJsonEval::new());
-  let outs = run_batch(&cases, eval.as_ref(), &store).expect("batch");
+  let outs = run_batch_sync(&cases, BatchJsonEval::new(), &store).expect("batch");
   assert_eq!(outs.len(), 5);
   assert!(matches!(outs[0].1, Exit::Success(CaseVerdict::Pass)));
   assert!(matches!(
@@ -234,7 +255,7 @@ fn collect_formatted_lines_json_is_empty() {
 }
 
 #[test]
-fn report_outcomes_stdout_smoke() {
+fn render_report_human_smoke() {
   let outcomes = vec![("a".into(), AssayOutcome::Pass)];
   let summary = RunSummary {
     total: 1,
@@ -242,7 +263,8 @@ fn report_outcomes_stdout_smoke() {
     failed: 0,
     errored: 0,
   };
-  report_outcomes_stdout(&outcomes, ReportFormat::Human, &summary).unwrap();
+  let text = render_report(&outcomes, ReportFormat::Human, &summary).unwrap();
+  assert_eq!(text, "PASS a\n\n1/1 passed, 0 failed, 0 errored");
 }
 
 #[test]
@@ -310,18 +332,6 @@ fn gen_edge_sizes_and_builtin_props() {
 }
 
 #[test]
-fn semaphore_pool_acquire_and_release() {
-  let pool = SemaphoreWorkerPool::new(2);
-  let g1 = pool.acquire().unwrap();
-  let g2 = pool.acquire().unwrap();
-  assert_eq!(pool.stats().in_flight(), 2);
-  drop(g1);
-  drop(g2);
-  assert_eq!(pool.stats().in_flight(), 0);
-  assert!(pool.stats().max_in_flight() >= 2);
-}
-
-#[test]
 fn mock_nix_eval_batched_nested_and_invalid() {
   let mock = Arc::new(MockNixEval::default());
   mock.set("inner", EvalResult::Ok(json!(1)));
@@ -346,16 +356,6 @@ fn mock_nix_eval_batched_nested_and_invalid() {
     mock.eval_json("[ (bad) (other) ]"),
     EvalResult::Err(_)
   ));
-}
-
-#[test]
-fn std_clock_sleep_future_path() {
-  use std::time::{Duration, Instant};
-  let clock = StdClock;
-  let future = clock.sleep(Duration::from_millis(5));
-  id_effect::runtime::run_blocking(future, ()).expect("sleep");
-  let until = clock.sleep_until(Instant::now() + Duration::from_millis(1));
-  id_effect::runtime::run_blocking(until, ()).expect("sleep_until");
 }
 
 #[test]
@@ -423,7 +423,7 @@ struct ForceBatchEval {
   payload: Value,
 }
 
-impl EvalBackend for ForceBatchEval {
+impl SyncEval for ForceBatchEval {
   fn eval_json(&self, expr: &str) -> EvalResult {
     if expr.contains(BATCH_MARKER) {
       EvalResult::Ok(self.payload.clone())
@@ -435,24 +435,22 @@ impl EvalBackend for ForceBatchEval {
 
 #[test]
 fn force_batch_json_eval_happy_path() {
-  FORCE_BATCH_JSON_EVAL.with(|f| {
-        f.set(true);
-        let cases = vec![(
-            "eq".into(),
-            Claim::Eq {
-                left_expr: "1".into(),
-                right_expr: "1".into(),
-            },
-        )];
-        let eval = ForceBatchEval {
-            payload: json!({
-                BATCH_MARKER: true,
-                "results": [{"kind": "eq", "left": {"ok": true, "value": 1}, "right": {"ok": true, "value": 1}}]
-            }),
-        };
-        let store = SnapshotStore::new(PathBuf::from("/tmp/assay-force-batch"));
-        let outs = run_batch(&cases, &eval, &store).expect("batch");
-        assert_eq!(outs.len(), 1);
-        f.set(false);
-    });
+  {
+    let cases = vec![(
+      "eq".into(),
+      Claim::Eq {
+        left_expr: "1".into(),
+        right_expr: "1".into(),
+      },
+    )];
+    let eval = ForceBatchEval {
+      payload: json!({
+          BATCH_MARKER: true,
+          "results": [{"kind": "eq", "left": {"ok": true, "value": 1}, "right": {"ok": true, "value": 1}}]
+      }),
+    };
+    let store = SnapshotStore::new(PathBuf::from("/tmp/assay-force-batch"));
+    let outs = run_batch_sync(&cases, eval, &store).expect("batch");
+    assert_eq!(outs.len(), 1);
+  }
 }

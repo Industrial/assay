@@ -2,7 +2,7 @@
 
 Fixed-output `fetchurl` / `fetchgit` download and flat/NAR hash verification on id_effect.
 
-**Doctrine:** Pure hash/NAR/verify algebra; I/O via DI 3.0 caps (`HttpFetch`, `GitFetch`, `PathIo`, `Clock`); CLI = `run_with` + `id_effect_cli` exit codes.
+**Doctrine:** Pure hash/NAR/verify algebra; all I/O via id_effect 0.13 capabilities (`Http`, `Git`, `PathIo`; live adapters in `src/lib/live.rs`, fakes behind `test-support`); `fetch-url` / `fetch-git` retry transient failures (3 retries, 100 ms exponential backoff, jittered) with a 30 s per-attempt and 120 s overall timeout; `fetch-git` checks out into a staging dir that is removed however the run ends. CLI = `id_effect_cli::run_main` (via `nixstore::edge::run_main_coded_by`).
 
 ## CLI
 
@@ -15,7 +15,7 @@ nixfetch fetch-git https://example.com/repo.git --rev abc123 --hash 0…
 nixfetch store-path --name pkg --hash sha256-… [--recursive]
 ```
 
-Exit: `0` match/success, `1` hash mismatch, `≥2` infra.
+Exit: `0` match/success, `1` hash mismatch (only), `2` any other failure (io, parse, http, git, timeout) or usage error, `101` defect, `130` Ctrl-C.
 
 ## Library
 

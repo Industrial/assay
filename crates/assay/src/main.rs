@@ -1,19 +1,26 @@
 //! Assay CLI — discover and run Nix unit test suites.
+//!
+//! Exit codes: `0` every case passed; `1` any case did not pass, a suite could not be loaded (or
+//! the path is missing), a bad `--format`, or a `discover` / `laws` failure; `2` usage errors
+//! (clap); `101` a defect (in the runner or a case); `130` Ctrl-C (running `nix` children are
+//! killed).
 
-use std::path::{Path, PathBuf};
+use std::fmt;
+use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-use id_effect::failure::pretty_cause;
-use id_effect::{Cause, Exit, run_with};
-use id_effect_cli::{cause_max_exit_byte, exit_code_for_cause};
+use id_effect::{Effect, suspend};
+use nixstore::edge::{CliError, from_result, run_main_coded_by};
 use serde::Serialize;
 
-use assay::caps::live_providers;
-use assay::discover::discover_suites;
-use assay::run::{RunOptions, run_discovered, run_suite, summarize};
-use assay::verdict::{CaseVerdict, InfraError, exit_to_outcome};
-use assay::{AssayOutcome, ReportFormat, SuiteReport, report_outcomes_stdout};
+use assay::{
+  AssayOutcome, InfraError, ReportFormat, RunOptions, SnapshotStore, Trace, default_snapshot_root,
+  discover, fs_layer, layer, render_report, run_path, store_root_from, summarize,
+};
 
 #[derive(Parser)]
 #[command(
@@ -48,11 +55,37 @@ enum Commands {
     path: PathBuf,
   },
   Laws {
-    #[arg(long, default_value_t = 0)]
+    // A literal default: `default_value_t` expands to a `static` (no_static_service_globals).
+    #[arg(long, default_value = "0")]
     seed: u64,
     #[arg(long)]
     json: bool,
   },
+}
+
+/// Why a command failed (every one exits 1).
+#[derive(Debug)]
+enum MainError {
+  /// A bad `--format` / `--json` combination.
+  Usage(String),
+  Infra(InfraError),
+}
+
+// `fmt` is a trait method: its `fmt::Result` is not ours to change.
+#[cfg_attr(dylint_lib = "id_effect_lints", allow(no_result_return_in_pub_fn))]
+impl fmt::Display for MainError {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Usage(m) => write!(f, "assay: {m}"),
+      Self::Infra(e) => write!(f, "assay: {e}"),
+    }
+  }
+}
+
+impl From<InfraError> for MainError {
+  fn from(e: InfraError) -> Self {
+    Self::Infra(e)
+  }
 }
 
 #[derive(Serialize)]
@@ -62,7 +95,7 @@ struct JsonOutcome {
 }
 
 fn main() -> ExitCode {
-  match Cli::parse().command {
+  let program = match Cli::parse().command {
     Commands::Run {
       path,
       json,
@@ -72,164 +105,152 @@ fn main() -> ExitCode {
       retry_flaky_eval,
       no_batch,
     } => cmd_run(
-      &path,
+      path,
       json,
-      format.as_deref(),
-      update_snapshots,
-      case_timeout_ms,
-      retry_flaky_eval,
-      !no_batch,
+      format,
+      RunOptions {
+        update_snapshots,
+        case_timeout_ms,
+        retry_flaky_eval,
+        batch_eval: !no_batch,
+        trace: trace_from_env(),
+        ..RunOptions::default()
+      },
     ),
-    Commands::Discover { path } => cmd_discover(&path),
+    Commands::Discover { path } => cmd_discover(path),
     Commands::Laws { seed, json } => cmd_laws(seed, json),
-  }
+  };
+  run_main_coded_by(program.map_err(CliError), |_| 1)
 }
 
+/// `assay run`: runs the suite (or every suite under a directory) and prints the report; exits
+/// with the worst case's code.
 fn cmd_run(
-  path: &Path,
+  path: PathBuf,
   json: bool,
-  format: Option<&str>,
-  update_snapshots: bool,
-  case_timeout_ms: Option<u64>,
-  retry_flaky_eval: bool,
-  batch_eval: bool,
-) -> ExitCode {
-  let report_format = match resolve_format(json, format) {
+  format: Option<String>,
+  mut opts: RunOptions,
+) -> Effect<u8, MainError> {
+  let report_format = match resolve_format(json, format.as_deref()) {
     Ok(f) => f,
-    Err(err) => {
-      eprintln!("assay: {err}");
-      return ExitCode::from(1);
-    }
+    Err(e) => return id_effect::fail(e),
   };
-
-  let opts = RunOptions {
-    update_snapshots,
-    json_output: report_format == ReportFormat::Json,
-    case_timeout_ms,
-    retry_flaky_eval,
-    batch_eval,
-  };
-
-  let effect = if path.is_dir() {
-    run_discovered(path, &opts)
-  } else {
-    run_suite(path, &opts)
-  };
-
-  let providers = live_providers();
-  let t_run = std::time::Instant::now();
-  match run_with(providers, effect) {
-    Ok(report) => {
-      if std::env::var_os("ASSAY_TRACE").is_some() {
-        eprintln!(
-          "assay_trace: run_with {:.1}ms",
-          t_run.elapsed().as_secs_f64() * 1000.0
-        );
-      }
-      let outcomes = legacy_outcomes(&report);
+  opts.json_output = report_format == ReportFormat::Json;
+  let snapshots = SnapshotStore::new(default_snapshot_root()).with_update(opts.update_snapshots);
+  let store_root = store_root_from(std::env::var_os("ASSAY_NIX_STORE"));
+  let trace = opts.trace.clone();
+  run_path(&path, &opts)
+    .provide_layer(layer::<InfraError>(store_root, snapshots))
+    .map_err(MainError::from)
+    .flat_map(move |report| {
+      trace.note("run".into());
       let summary = summarize(&report);
-      if let Err(err) = report_outcomes_stdout(&outcomes, report_format, &summary) {
-        eprintln!("assay: {err}");
-        return ExitCode::from(1);
-      }
-      exit_code_for_suite(&report)
-    }
-    Err(infra) => {
-      let cause = Cause::Fail(infra);
-      eprintln!("{}", pretty_cause(&cause));
-      exit_code_for_cause(cause)
-    }
-  }
+      let text = render_report(&report.legacy_outcomes(), report_format, &summary);
+      let code = report.exit_byte();
+      from_result(text.map_err(MainError::from))
+        .flat_map(print_text)
+        .map(move |()| code)
+    })
 }
 
-fn legacy_outcomes(report: &SuiteReport) -> Vec<(String, AssayOutcome)> {
-  report
-    .outcomes
-    .iter()
-    .map(|(name, exit)| (name.clone(), exit_to_outcome(exit.clone())))
-    .collect()
-}
-
-fn resolve_format(json: bool, format: Option<&str>) -> Result<ReportFormat, String> {
+fn resolve_format(json: bool, format: Option<&str>) -> Result<ReportFormat, MainError> {
+  let usage = MainError::Usage;
   match (json, format) {
     (true, Some(f)) => {
-      let parsed = ReportFormat::parse(f).ok_or_else(|| format!("unknown report format: {f}"))?;
+      let parsed =
+        ReportFormat::parse(f).ok_or_else(|| usage(format!("unknown report format: {f}")))?;
       if parsed != ReportFormat::Json {
-        return Err(format!("--json conflicts with --format {f}"));
+        return Err(usage(format!("--json conflicts with --format {f}")));
       }
       Ok(parsed)
     }
     (true, None) => Ok(ReportFormat::Json),
-    (false, Some(f)) => ReportFormat::parse(f)
-      .ok_or_else(|| format!("unknown report format: {f} (expected human, json, or tap)")),
+    (false, Some(f)) => ReportFormat::parse(f).ok_or_else(|| {
+      usage(format!(
+        "unknown report format: {f} (expected human, json, or tap)"
+      ))
+    }),
     (false, None) => Ok(ReportFormat::Human),
   }
 }
 
-fn cmd_discover(path: &Path) -> ExitCode {
-  match discover_suites(path) {
-    Ok(suites) => {
-      for suite in suites {
-        println!("{} ({:?})", suite.path.display(), suite.kind);
-      }
-      ExitCode::SUCCESS
-    }
-    Err(err) => {
-      eprintln!("assay: discover {}: {err:#}", path.display());
-      ExitCode::from(1)
-    }
-  }
+/// `assay discover`: one line per suite file.
+fn cmd_discover(path: PathBuf) -> Effect<u8, MainError> {
+  discover(&path)
+    .provide_layer(fs_layer::<InfraError>())
+    .map_err(move |e| MainError::Infra(InfraError::Io(format!("discover {}: {e}", path.display()))))
+    .flat_map(|suites| {
+      let text: String = suites
+        .iter()
+        .map(|s| format!("{} ({:?})\n", s.path.display(), s.kind))
+        .collect();
+      print_text(text)
+    })
+    .map(|()| 0)
 }
 
-fn cmd_laws(seed: u64, json: bool) -> ExitCode {
-  let laws = assay::run_builtin_laws(seed);
-  let failed = laws.iter().any(|(_, o)| *o != AssayOutcome::Pass);
-  if json {
-    let rows: Vec<JsonOutcome> = laws
-      .into_iter()
-      .map(|(name, outcome)| JsonOutcome {
-        name: name.to_string(),
-        outcome,
-      })
-      .collect();
-    match serde_json::to_string_pretty(&rows) {
-      Ok(s) => println!("{s}"),
-      Err(err) => {
-        eprintln!("assay: {err}");
-        return ExitCode::from(1);
-      }
-    }
-  } else {
-    for (name, outcome) in laws {
-      let mark = if outcome == AssayOutcome::Pass {
-        "PASS"
-      } else {
-        "FAIL"
-      };
-      println!("{mark} {name}");
-    }
-  }
-  if failed {
-    ExitCode::from(1)
-  } else {
-    ExitCode::SUCCESS
-  }
+/// `assay laws`: runs the built-in laws; exits 1 when any fails.
+fn cmd_laws(seed: u64, json: bool) -> Effect<u8, MainError> {
+  suspend(move || {
+    let laws = assay::run_builtin_laws(seed);
+    let code = u8::from(laws.iter().any(|(_, o)| *o != AssayOutcome::Pass));
+    let text = if json {
+      let rows: Vec<JsonOutcome> = laws
+        .into_iter()
+        .map(|(name, outcome)| JsonOutcome {
+          name: name.to_string(),
+          outcome,
+        })
+        .collect();
+      serde_json::to_string_pretty(&rows)
+        .map(|s| format!("{s}\n"))
+        .map_err(|e| MainError::Infra(InfraError::Io(format!("render laws: {e}"))))
+    } else {
+      Ok(
+        laws
+          .into_iter()
+          .map(|(name, outcome)| {
+            let mark = if outcome == AssayOutcome::Pass {
+              "PASS"
+            } else {
+              "FAIL"
+            };
+            format!("{mark} {name}\n")
+          })
+          .collect(),
+      )
+    };
+    from_result(text).flat_map(print_text).map(move |()| code)
+  })
 }
 
-fn exit_code_for_suite(report: &SuiteReport) -> ExitCode {
-  let worst = report
-    .outcomes
-    .iter()
-    .map(|(_, exit)| exit_code_byte(exit))
-    .max()
-    .unwrap_or(0);
-  ExitCode::from(worst)
+/// Writes `text` to stdout as is (a human report has no trailing newline).
+fn print_text(text: String) -> Effect<(), MainError> {
+  suspend(move || {
+    let mut out = std::io::stdout().lock();
+    from_result(
+      out
+        .write_all(text.as_bytes())
+        .and_then(|()| out.flush())
+        .map_err(|e| MainError::Infra(InfraError::Io(format!("<stdout>: {e}")))),
+    )
+  })
 }
 
-fn exit_code_byte(exit: &Exit<CaseVerdict, InfraError>) -> u8 {
-  match exit {
-    Exit::Failure(cause) => cause_max_exit_byte(cause),
-    Exit::Success(CaseVerdict::Pass) => 0,
-    Exit::Success(_) => 1,
+/// With `ASSAY_TRACE` set, progress notes go to stderr with the time since the previous note
+/// (wall-clock timing lives here, at the edge).
+fn trace_from_env() -> Trace {
+  if std::env::var_os("ASSAY_TRACE").is_none() {
+    return Trace::default();
   }
+  let last = Arc::new(Mutex::new(Instant::now()));
+  Trace::to(move |note| {
+    let mut last = last.lock().unwrap_or_else(PoisonError::into_inner);
+    let now = Instant::now();
+    eprintln!(
+      "assay_trace: {note} {:.1}ms",
+      now.duration_since(*last).as_secs_f64() * 1000.0
+    );
+    *last = now;
+  })
 }

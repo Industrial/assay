@@ -1,404 +1,521 @@
-//! Schema decode/encode for [`Claim`] and assay suite JSON via id_effect.
+//! Suite and claim decoding via id_effect schemas.
+//!
+//! The suite JSON (`nix eval --json` of a `.assay.nix`, or a `.assay.json` / compat `.json` file)
+//! is mirrored by `#[derive(Schema)]` wire structs, one per claim shape, and decoded with
+//! `decode_unknown_all`: a malformed suite reports every issue with its path
+//! (`cases.<case>.<field>: …`, see [`describe_issues`]).
+//!
+//! What the derive (structs with named fields over `String` / `bool` / numbers / `Option` /
+//! `Vec` / other `HasSchema` types) cannot express is hand-written, and only that:
+//! - the leaf codecs [`NixValue`] (any JSON value: a claim's `actual` / `expected` / `expect`;
+//!   there is no `serde_json::Value` field type), [`NixSource`] (Nix source: a string as is, any
+//!   other JSON rendered as a Nix literal), [`Seed`] (`u64`) and [`Trials`] (`u32`);
+//! - the dispatch on the `claim` tag (and on `actual` for value vs expression mode) in
+//!   [`HasSchema for Claim`](Claim): the derive has no enums / tagged unions;
+//! - [`SuiteCases`], the `cases` map (`record` of claims; its wire is a map, not `Unknown`).
+//!
+//! Numbers: the serde bridge clamps integers above `i64::MAX`; Nix integers are `i64`, so no
+//! suite value is affected (and decoding is unchanged from the hand-written codec).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use id_effect::schema::HasSchema;
-use id_effect::schema::parse::{ParseError, Schema, Unknown};
-use id_effect::schema::unknown_from_serde_json;
+use id_effect::Schema;
+use id_effect::schema::{
+  HasSchema, ParseError, ParseErrors, Unknown, i64_unknown_wire, record, serde_json_from_unknown,
+  transform, unknown_from_serde_json,
+};
 use serde_json::Value;
 
 use crate::claims::Claim;
-use crate::compat::field_to_nix;
+use crate::compat::{CompatCase, field_to_nix};
 
-/// Canonical bidirectional schema for assay claim JSON objects.
-pub fn claim_schema() -> Schema<Claim, Unknown, ()> {
+/// Every claim kind, for the "expected one of" message.
+const CLAIM_KINDS: &str = "eq|throws|subset|hasAttrs|drv|snapshot|forces|module|law|prop|pathInfo";
+
+// ── leaf codecs ─────────────────────────────────────────────────────────────────────────────
+
+/// A schema over the `Unknown` wire from an accumulating decoder and an encoder; the fail-fast
+/// decoders report its first issue.
+fn unknown_codec<A: 'static>(
+  decode_all: impl Fn(&Unknown) -> Result<A, ParseErrors> + Send + Sync + 'static,
+  encode: impl Fn(A) -> Unknown + Send + Sync + 'static,
+) -> Schema<A, Unknown> {
+  let decode_all = Arc::new(decode_all);
+  let (owned, borrowed) = (Arc::clone(&decode_all), Arc::clone(&decode_all));
   Schema::make(
-    |u: Unknown| decode_claim_unknown(&u),
-    encode_claim_unknown,
-    decode_claim_unknown,
+    move |u: Unknown| first_issue(owned(&u)),
+    encode,
+    move |u: &Unknown| first_issue(borrowed(u)),
   )
+  .with_decode_unknown_all(move |u| decode_all(u))
 }
 
-/// Decode a claim from a JSON value.
-pub fn decode_claim_json(value: &Value) -> Result<Claim, ParseError> {
-  let unknown = unknown_from_serde_json(value.clone());
-  claim_schema().decode_unknown(&unknown)
+fn first_issue<A>(decoded: Result<A, ParseErrors>) -> Result<A, ParseError> {
+  decoded.map_err(|e| {
+    e.issues
+      .into_iter()
+      .next()
+      .unwrap_or_else(|| ParseError::new("", "invalid value"))
+  })
 }
 
-/// Encode a claim to a JSON value.
-pub fn encode_claim_json(claim: &Claim) -> Value {
-  unknown_to_json(&claim_schema().encode(claim.clone()))
-}
+/// Any JSON value, kept as is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NixValue(pub Value);
 
-/// Decode an assay suite `cases` object into named claims.
-pub fn decode_suite_cases(value: &Value) -> Result<Vec<(String, Claim)>, ParseError> {
-  let obj = value
-    .as_object()
-    .ok_or_else(|| ParseError::new("cases", "expected object"))?;
-  let mut out = Vec::with_capacity(obj.len());
-  for (name, case_val) in obj {
-    let claim = decode_claim_json(case_val).map_err(|e| e.prefix(name))?;
-    out.push((name.clone(), claim));
+impl HasSchema for NixValue {
+  type A = Self;
+  type I = Unknown;
+  type E = ();
+
+  fn schema() -> Schema<Self, Unknown> {
+    unknown_codec(
+      |u| Ok(NixValue(serde_json_from_unknown(u))),
+      |v: NixValue| unknown_from_serde_json(v.0),
+    )
   }
-  Ok(out)
 }
 
-fn decode_claim_unknown(value: &Unknown) -> Result<Claim, ParseError> {
-  let obj = match value {
-    Unknown::Object(map) => map,
-    _ => return Err(ParseError::new("", "claim must be a JSON object")),
-  };
+/// Nix source text: a JSON string is the source; any other JSON value is rendered as the Nix
+/// literal of that value (see [`field_to_nix`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NixSource(pub String);
 
-  let tag = require_str(obj, "claim")?;
-  match tag.as_str() {
-    "eq" => {
-      if obj.contains_key("actual") {
-        Ok(Claim::EqValues {
-          left: json_field(obj, "actual")?,
-          right: json_field(obj, "expected")?,
-        })
-      } else {
-        Ok(Claim::Eq {
-          left_expr: source_field(obj, "expr")?,
-          right_expr: source_field(obj, "expected")?,
-        })
-      }
+impl HasSchema for NixSource {
+  type A = Self;
+  type I = Unknown;
+  type E = ();
+
+  fn schema() -> Schema<Self, Unknown> {
+    transform(
+      NixValue::schema(),
+      |v: NixValue| Ok(NixSource(field_to_nix(&v.0))),
+      |s: NixSource| NixValue(Value::String(s.0)),
+    )
+  }
+}
+
+/// A non-negative integer seed (encoded saturating at `i64::MAX`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Seed(pub u64);
+
+impl HasSchema for Seed {
+  type A = Self;
+  type I = Unknown;
+  type E = ();
+
+  fn schema() -> Schema<Self, Unknown> {
+    transform(
+      i64_unknown_wire(),
+      |n: i64| {
+        u64::try_from(n)
+          .map(Seed)
+          .map_err(|_| ParseError::new("", "expected a non-negative integer"))
+      },
+      |s: Seed| i64::try_from(s.0).unwrap_or(i64::MAX),
+    )
+  }
+}
+
+/// A property trial count (`u32`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Trials(pub u32);
+
+impl HasSchema for Trials {
+  type A = Self;
+  type I = Unknown;
+  type E = ();
+
+  fn schema() -> Schema<Self, Unknown> {
+    transform(
+      i64_unknown_wire(),
+      |n: i64| {
+        u32::try_from(n)
+          .map(Trials)
+          .map_err(|_| ParseError::new("", format!("expected an integer in 0..={}", u32::MAX)))
+      },
+      |t: Trials| i64::from(t.0),
+    )
+  }
+}
+
+// ── claim wire shapes ───────────────────────────────────────────────────────────────────────
+
+/// `eq` in expression mode.
+#[derive(Debug, Clone, Schema)]
+struct EqWire {
+  expr: NixSource,
+  expected: NixSource,
+}
+
+/// `eq` / `subset` in value mode (the suite evaluated both sides).
+#[derive(Debug, Clone, Schema)]
+struct ValuesWire {
+  actual: NixValue,
+  expected: NixValue,
+}
+
+#[derive(Debug, Clone, Schema)]
+struct ThrowsWire {
+  expr: NixSource,
+  pattern: Option<NixSource>,
+}
+
+#[derive(Debug, Clone, Schema)]
+struct SubsetWire {
+  expr: NixSource,
+  expected: NixValue,
+}
+
+#[derive(Debug, Clone, Schema)]
+struct HasAttrsWire {
+  expr: NixSource,
+  attrs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Schema)]
+struct HasAttrsValuesWire {
+  actual: NixValue,
+  attrs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Schema)]
+struct DrvWire {
+  expr: NixSource,
+  project: Vec<String>,
+  expected: NixValue,
+}
+
+#[derive(Debug, Clone, Schema)]
+struct DrvValuesWire {
+  actual: NixValue,
+  project: Vec<String>,
+  expected: NixValue,
+}
+
+#[derive(Debug, Clone, Schema)]
+struct SnapshotWire {
+  name: String,
+  expr: NixSource,
+}
+
+#[derive(Debug, Clone, Schema)]
+struct ForcesWire {
+  expr: NixSource,
+  paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Schema)]
+struct ModuleWire {
+  imports: NixSource,
+  args: NixSource,
+  expect: NixValue,
+}
+
+#[derive(Debug, Clone, Schema)]
+struct LawWire {
+  name: String,
+  seed: Seed,
+}
+
+#[derive(Debug, Clone, Schema)]
+struct PropWire {
+  name: String,
+  seed: Seed,
+  trials: Option<Trials>,
+}
+
+/// `pathInfo`; the closure-size flag is read as `closureSize` or `closure_size`.
+#[derive(Debug, Clone, Schema)]
+struct PathInfoWire {
+  path: String,
+  expect: NixValue,
+  referrers: Option<bool>,
+  #[schema("closureSize")]
+  closure_size: Option<bool>,
+  #[schema("closure_size")]
+  closure_size_snake: Option<bool>,
+}
+
+/// Decodes `input` as the wire shape `T`, collecting every issue.
+fn wire<T>(input: &Unknown) -> Result<T, ParseErrors>
+where
+  T: HasSchema<A = T, I = Unknown, E = ()>,
+{
+  <T as HasSchema>::schema().decode_unknown_all(input)
+}
+
+fn issue(path: &str, message: impl Into<String>) -> ParseErrors {
+  ParseErrors::one(ParseError::new(path, message))
+}
+
+fn decode_claim(input: &Unknown) -> Result<Claim, ParseErrors> {
+  let Unknown::Object(obj) = input else {
+    return Err(issue("", "expected a claim object"));
+  };
+  let tag = match obj.get("claim") {
+    Some(Unknown::String(tag)) => tag.as_str(),
+    Some(_) => {
+      return Err(issue(
+        "claim",
+        format!("expected a string, one of {CLAIM_KINDS}"),
+      ));
     }
-    "throws" => {
-      let pattern = match obj.get("pattern") {
-        None | Some(Unknown::Null) => None,
-        Some(other) => Some(source_field_from_unknown(other, "pattern")?),
-      };
-      Ok(Claim::Throws {
-        expr: source_field(obj, "expr")?,
-        pattern,
-      })
+    None => {
+      return Err(issue(
+        "claim",
+        format!("missing field, one of {CLAIM_KINDS}"),
+      ));
     }
-    "subset" => {
-      if obj.contains_key("actual") {
-        Ok(Claim::SubsetValues {
-          actual: json_field(obj, "actual")?,
-          expected_subset: json_field(obj, "expected")?,
-        })
-      } else {
-        Ok(Claim::Subset {
-          expr: source_field(obj, "expr")?,
-          expected_subset: json_field(obj, "expected")?,
-        })
-      }
-    }
-    "hasAttrs" => {
-      let attrs = string_array_field(obj, "attrs")?;
-      if obj.contains_key("actual") {
-        Ok(Claim::HasAttrsValues {
-          actual: json_field(obj, "actual")?,
-          attrs,
-        })
-      } else {
-        Ok(Claim::HasAttrs {
-          expr: source_field(obj, "expr")?,
-          attrs,
-        })
-      }
-    }
-    "drv" => {
-      let project = string_array_field(obj, "project")?;
-      let expected = json_field(obj, "expected")?;
-      if obj.contains_key("actual") {
-        Ok(Claim::DrvValues {
-          actual: json_field(obj, "actual")?,
-          project,
-          expected,
-        })
-      } else {
-        Ok(Claim::Drv {
-          expr: source_field(obj, "expr")?,
-          project,
-          expected,
-        })
-      }
-    }
-    "snapshot" => Ok(Claim::Snapshot {
-      name: require_str(obj, "name")?,
-      expr: source_field(obj, "expr")?,
+  };
+  // Value mode: the suite evaluated the subject itself (`actual`) instead of passing source.
+  let values = obj.contains_key("actual");
+  match tag {
+    "eq" if values => wire::<ValuesWire>(input).map(|w| Claim::EqValues {
+      left: w.actual.0,
+      right: w.expected.0,
     }),
-    "forces" => Ok(Claim::Forces {
-      expr: source_field(obj, "expr")?,
-      paths: string_array_field(obj, "paths")?,
+    "eq" => wire::<EqWire>(input).map(|w| Claim::Eq {
+      left_expr: w.expr.0,
+      right_expr: w.expected.0,
     }),
-    "module" => Ok(Claim::Module {
-      imports_expr: source_field(obj, "imports")?,
-      args_expr: source_field(obj, "args")?,
-      expect: json_field(obj, "expect")?,
+    "throws" => wire::<ThrowsWire>(input).map(|w| Claim::Throws {
+      expr: w.expr.0,
+      pattern: w.pattern.map(|p| p.0),
     }),
-    "law" => Ok(Claim::Law {
-      name: require_str(obj, "name")?,
-      seed: u64_field(obj, "seed")?,
+    "subset" if values => wire::<ValuesWire>(input).map(|w| Claim::SubsetValues {
+      actual: w.actual.0,
+      expected_subset: w.expected.0,
     }),
-    "prop" => Ok(Claim::Prop {
-      name: require_str(obj, "name")?,
-      seed: u64_field(obj, "seed")?,
-      trials: optional_u32_field(obj, "trials")?,
+    "subset" => wire::<SubsetWire>(input).map(|w| Claim::Subset {
+      expr: w.expr.0,
+      expected_subset: w.expected.0,
     }),
-    "pathInfo" => Ok(Claim::PathInfo {
-      path: require_str(obj, "path")?,
-      expect: json_field(obj, "expect")?,
-      referrers: optional_bool_field(obj, "referrers")?.unwrap_or(false),
-      closure_size: optional_bool_field(obj, "closureSize")?
-        .or(optional_bool_field(obj, "closure_size")?)
-        .unwrap_or(false),
+    "hasAttrs" if values => wire::<HasAttrsValuesWire>(input).map(|w| Claim::HasAttrsValues {
+      actual: w.actual.0,
+      attrs: w.attrs,
     }),
-    other => Err(ParseError::new(
+    "hasAttrs" => wire::<HasAttrsWire>(input).map(|w| Claim::HasAttrs {
+      expr: w.expr.0,
+      attrs: w.attrs,
+    }),
+    "drv" if values => wire::<DrvValuesWire>(input).map(|w| Claim::DrvValues {
+      actual: w.actual.0,
+      project: w.project,
+      expected: w.expected.0,
+    }),
+    "drv" => wire::<DrvWire>(input).map(|w| Claim::Drv {
+      expr: w.expr.0,
+      project: w.project,
+      expected: w.expected.0,
+    }),
+    "snapshot" => wire::<SnapshotWire>(input).map(|w| Claim::Snapshot {
+      name: w.name,
+      expr: w.expr.0,
+    }),
+    "forces" => wire::<ForcesWire>(input).map(|w| Claim::Forces {
+      expr: w.expr.0,
+      paths: w.paths,
+    }),
+    "module" => wire::<ModuleWire>(input).map(|w| Claim::Module {
+      imports_expr: w.imports.0,
+      args_expr: w.args.0,
+      expect: w.expect.0,
+    }),
+    "law" => wire::<LawWire>(input).map(|w| Claim::Law {
+      name: w.name,
+      seed: w.seed.0,
+    }),
+    "prop" => wire::<PropWire>(input).map(|w| Claim::Prop {
+      name: w.name,
+      seed: w.seed.0,
+      trials: w.trials.map(|t| t.0),
+    }),
+    "pathInfo" => wire::<PathInfoWire>(input).map(|w| Claim::PathInfo {
+      path: w.path,
+      expect: w.expect.0,
+      referrers: w.referrers.unwrap_or(false),
+      closure_size: w.closure_size.or(w.closure_size_snake).unwrap_or(false),
+    }),
+    other => Err(issue(
       "claim",
-      format!("unsupported claim type: {other}"),
+      format!("unknown claim {other:?}, expected one of {CLAIM_KINDS}"),
     )),
   }
 }
 
-fn encode_claim_unknown(claim: Claim) -> Unknown {
-  let mut obj = BTreeMap::new();
+/// `wire` encoded with its `claim` tag; the `optional` keys are dropped when unset (`null`).
+fn tagged<T>(tag: &str, wire: T, optional: &[&str]) -> Unknown
+where
+  T: HasSchema<A = T, I = Unknown, E = ()>,
+{
+  let mut fields = match <T as HasSchema>::schema().encode(wire) {
+    Unknown::Object(fields) => fields,
+    other => BTreeMap::from([("value".to_owned(), other)]),
+  };
+  fields.retain(|key, value| !(optional.contains(&key.as_str()) && *value == Unknown::Null));
+  fields.insert("claim".into(), Unknown::String(tag.into()));
+  Unknown::Object(fields)
+}
+
+fn encode_claim(claim: Claim) -> Unknown {
+  let src = NixSource;
+  let val = NixValue;
   match claim {
     Claim::Eq {
       left_expr,
       right_expr,
-    } => {
-      obj.insert("claim".into(), Unknown::String("eq".into()));
-      insert_nix_field(&mut obj, "expr", &left_expr);
-      insert_nix_field(&mut obj, "expected", &right_expr);
-    }
-    Claim::EqValues { left, right } => {
-      obj.insert("claim".into(), Unknown::String("eq".into()));
-      obj.insert("actual".into(), unknown_from_serde_json(left));
-      obj.insert("expected".into(), unknown_from_serde_json(right));
-    }
-    Claim::Throws { expr, pattern } => {
-      obj.insert("claim".into(), Unknown::String("throws".into()));
-      insert_nix_field(&mut obj, "expr", &expr);
-      if let Some(pat) = pattern {
-        obj.insert("pattern".into(), Unknown::String(pat));
-      }
-    }
+    } => tagged(
+      "eq",
+      EqWire {
+        expr: src(left_expr),
+        expected: src(right_expr),
+      },
+      &[],
+    ),
+    Claim::EqValues { left, right } => tagged(
+      "eq",
+      ValuesWire {
+        actual: val(left),
+        expected: val(right),
+      },
+      &[],
+    ),
+    Claim::Throws { expr, pattern } => tagged(
+      "throws",
+      ThrowsWire {
+        expr: src(expr),
+        pattern: pattern.map(src),
+      },
+      &["pattern"],
+    ),
     Claim::Subset {
       expr,
       expected_subset,
-    } => {
-      obj.insert("claim".into(), Unknown::String("subset".into()));
-      insert_nix_field(&mut obj, "expr", &expr);
-      obj.insert("expected".into(), unknown_from_serde_json(expected_subset));
-    }
+    } => tagged(
+      "subset",
+      SubsetWire {
+        expr: src(expr),
+        expected: val(expected_subset),
+      },
+      &[],
+    ),
     Claim::SubsetValues {
       actual,
       expected_subset,
-    } => {
-      obj.insert("claim".into(), Unknown::String("subset".into()));
-      obj.insert("actual".into(), unknown_from_serde_json(actual));
-      obj.insert("expected".into(), unknown_from_serde_json(expected_subset));
-    }
-    Claim::HasAttrs { expr, attrs } => {
-      obj.insert("claim".into(), Unknown::String("hasAttrs".into()));
-      insert_nix_field(&mut obj, "expr", &expr);
-      obj.insert(
-        "attrs".into(),
-        Unknown::Array(attrs.into_iter().map(Unknown::String).collect()),
-      );
-    }
-    Claim::HasAttrsValues { actual, attrs } => {
-      obj.insert("claim".into(), Unknown::String("hasAttrs".into()));
-      obj.insert("actual".into(), unknown_from_serde_json(actual));
-      obj.insert(
-        "attrs".into(),
-        Unknown::Array(attrs.into_iter().map(Unknown::String).collect()),
-      );
-    }
+    } => tagged(
+      "subset",
+      ValuesWire {
+        actual: val(actual),
+        expected: val(expected_subset),
+      },
+      &[],
+    ),
+    Claim::HasAttrs { expr, attrs } => tagged(
+      "hasAttrs",
+      HasAttrsWire {
+        expr: src(expr),
+        attrs,
+      },
+      &[],
+    ),
+    Claim::HasAttrsValues { actual, attrs } => tagged(
+      "hasAttrs",
+      HasAttrsValuesWire {
+        actual: val(actual),
+        attrs,
+      },
+      &[],
+    ),
     Claim::Drv {
       expr,
       project,
       expected,
-    } => {
-      obj.insert("claim".into(), Unknown::String("drv".into()));
-      insert_nix_field(&mut obj, "expr", &expr);
-      obj.insert(
-        "project".into(),
-        Unknown::Array(project.into_iter().map(Unknown::String).collect()),
-      );
-      obj.insert("expected".into(), unknown_from_serde_json(expected));
-    }
+    } => tagged(
+      "drv",
+      DrvWire {
+        expr: src(expr),
+        project,
+        expected: val(expected),
+      },
+      &[],
+    ),
     Claim::DrvValues {
       actual,
       project,
       expected,
-    } => {
-      obj.insert("claim".into(), Unknown::String("drv".into()));
-      obj.insert("actual".into(), unknown_from_serde_json(actual));
-      obj.insert(
-        "project".into(),
-        Unknown::Array(project.into_iter().map(Unknown::String).collect()),
-      );
-      obj.insert("expected".into(), unknown_from_serde_json(expected));
-    }
-    Claim::Snapshot { name, expr } => {
-      obj.insert("claim".into(), Unknown::String("snapshot".into()));
-      obj.insert("name".into(), Unknown::String(name));
-      insert_nix_field(&mut obj, "expr", &expr);
-    }
-    Claim::Forces { expr, paths } => {
-      obj.insert("claim".into(), Unknown::String("forces".into()));
-      insert_nix_field(&mut obj, "expr", &expr);
-      obj.insert(
-        "paths".into(),
-        Unknown::Array(paths.into_iter().map(Unknown::String).collect()),
-      );
-    }
+    } => tagged(
+      "drv",
+      DrvValuesWire {
+        actual: val(actual),
+        project,
+        expected: val(expected),
+      },
+      &[],
+    ),
+    Claim::Snapshot { name, expr } => tagged(
+      "snapshot",
+      SnapshotWire {
+        name,
+        expr: src(expr),
+      },
+      &[],
+    ),
+    Claim::Forces { expr, paths } => tagged(
+      "forces",
+      ForcesWire {
+        expr: src(expr),
+        paths,
+      },
+      &[],
+    ),
     Claim::Module {
       imports_expr,
       args_expr,
       expect,
-    } => {
-      obj.insert("claim".into(), Unknown::String("module".into()));
-      insert_nix_field(&mut obj, "imports", &imports_expr);
-      insert_nix_field(&mut obj, "args", &args_expr);
-      obj.insert("expect".into(), unknown_from_serde_json(expect));
-    }
-    Claim::Law { name, seed } => {
-      obj.insert("claim".into(), Unknown::String("law".into()));
-      obj.insert("name".into(), Unknown::String(name));
-      obj.insert(
-        "seed".into(),
-        Unknown::I64(i64::try_from(seed).unwrap_or(i64::MAX)),
-      );
-    }
+    } => tagged(
+      "module",
+      ModuleWire {
+        imports: src(imports_expr),
+        args: src(args_expr),
+        expect: val(expect),
+      },
+      &[],
+    ),
+    Claim::Law { name, seed } => tagged(
+      "law",
+      LawWire {
+        name,
+        seed: Seed(seed),
+      },
+      &[],
+    ),
+    Claim::Prop { name, seed, trials } => tagged(
+      "prop",
+      PropWire {
+        name,
+        seed: Seed(seed),
+        trials: trials.map(Trials),
+      },
+      &["trials"],
+    ),
     Claim::PathInfo {
       path,
       expect,
       referrers,
       closure_size,
-    } => {
-      obj.insert("claim".into(), Unknown::String("pathInfo".into()));
-      obj.insert("path".into(), Unknown::String(path));
-      obj.insert("expect".into(), unknown_from_serde_json(expect));
-      if referrers {
-        obj.insert("referrers".into(), Unknown::Bool(true));
-      }
-      if closure_size {
-        obj.insert("closureSize".into(), Unknown::Bool(true));
-      }
-    }
-    Claim::Prop { name, seed, trials } => {
-      obj.insert("claim".into(), Unknown::String("prop".into()));
-      obj.insert("name".into(), Unknown::String(name));
-      obj.insert(
-        "seed".into(),
-        Unknown::I64(i64::try_from(seed).unwrap_or(i64::MAX)),
-      );
-      if let Some(trials) = trials {
-        obj.insert("trials".into(), Unknown::I64(i64::from(trials)));
-      }
-    }
-  }
-  Unknown::Object(obj)
-}
-
-fn require_str(obj: &BTreeMap<String, Unknown>, key: &str) -> Result<String, ParseError> {
-  match obj.get(key) {
-    Some(Unknown::String(s)) => Ok(s.clone()),
-    Some(_) => Err(ParseError::new(key, "expected string")),
-    None => Err(ParseError::new(key, format!("missing field {key}"))),
-  }
-}
-
-fn source_field(obj: &BTreeMap<String, Unknown>, key: &str) -> Result<String, ParseError> {
-  let value = obj
-    .get(key)
-    .ok_or_else(|| ParseError::new(key, format!("missing field {key}")))?;
-  source_field_from_unknown(value, key)
-}
-
-fn source_field_from_unknown(value: &Unknown, key: &str) -> Result<String, ParseError> {
-  let json = unknown_to_json(value);
-  field_to_nix(&json).map_err(|err| ParseError::new(key, err.to_string()))
-}
-
-fn json_field(obj: &BTreeMap<String, Unknown>, key: &str) -> Result<Value, ParseError> {
-  obj
-    .get(key)
-    .map(unknown_to_json)
-    .ok_or_else(|| ParseError::new(key, format!("missing field {key}")))
-}
-
-fn string_array_field(
-  obj: &BTreeMap<String, Unknown>,
-  key: &str,
-) -> Result<Vec<String>, ParseError> {
-  match obj.get(key) {
-    Some(Unknown::Array(items)) => items
-      .iter()
-      .enumerate()
-      .map(|(idx, item)| match item {
-        Unknown::String(s) => Ok(s.clone()),
-        _ => Err(ParseError::new(format!("{key}[{idx}]"), "expected string")),
-      })
-      .collect(),
-    Some(_) => Err(ParseError::new(key, "expected array")),
-    None => Err(ParseError::new(key, format!("missing field {key}"))),
-  }
-}
-
-fn u64_field(obj: &BTreeMap<String, Unknown>, key: &str) -> Result<u64, ParseError> {
-  match obj.get(key) {
-    Some(Unknown::I64(n)) if *n >= 0 => Ok(*n as u64),
-    Some(Unknown::I64(_)) => Err(ParseError::new(key, "seed must be non-negative")),
-    Some(_) => Err(ParseError::new(key, "expected integer")),
-    None => Err(ParseError::new(key, format!("missing field {key}"))),
-  }
-}
-
-fn optional_bool_field(
-  obj: &BTreeMap<String, Unknown>,
-  key: &str,
-) -> Result<Option<bool>, ParseError> {
-  match obj.get(key) {
-    None => Ok(None),
-    Some(Unknown::Bool(b)) => Ok(Some(*b)),
-    Some(other) => Err(ParseError::new(
-      key,
-      format!("expected bool, got {other:?}"),
-    )),
-  }
-}
-
-fn optional_u32_field(
-  obj: &BTreeMap<String, Unknown>,
-  key: &str,
-) -> Result<Option<u32>, ParseError> {
-  match obj.get(key) {
-    None | Some(Unknown::Null) => Ok(None),
-    Some(Unknown::I64(n)) if *n >= 0 && *n <= i64::from(u32::MAX) => Ok(Some(*n as u32)),
-    Some(Unknown::I64(_)) => Err(ParseError::new(key, "trials out of range")),
-    Some(_) => Err(ParseError::new(key, "expected integer")),
-  }
-}
-
-fn insert_nix_field(obj: &mut BTreeMap<String, Unknown>, key: &str, expr: &str) {
-  obj.insert(key.into(), Unknown::String(expr.to_string()));
-}
-
-fn unknown_to_json(value: &Unknown) -> Value {
-  match value {
-    Unknown::Null => Value::Null,
-    Unknown::Bool(b) => Value::Bool(*b),
-    Unknown::I64(n) => Value::Number((*n).into()),
-    Unknown::F64(n) => serde_json::Number::from_f64(*n)
-      .map(Value::Number)
-      .unwrap_or(Value::Null),
-    Unknown::String(s) => Value::String(s.clone()),
-    Unknown::Array(items) => Value::Array(items.iter().map(unknown_to_json).collect()),
-    Unknown::Object(map) => {
-      let mut out = serde_json::Map::new();
-      for (key, item) in map {
-        out.insert(key.clone(), unknown_to_json(item));
-      }
-      Value::Object(out)
-    }
+    } => tagged(
+      "pathInfo",
+      PathInfoWire {
+        path,
+        expect: val(expect),
+        referrers: referrers.then_some(true),
+        closure_size: closure_size.then_some(true),
+        closure_size_snake: None,
+      },
+      &["referrers", "closureSize", "closure_size"],
+    ),
   }
 }
 
@@ -408,11 +525,97 @@ impl HasSchema for Claim {
   type E = ();
 
   fn schema() -> Schema<Self::A, Self::I, Self::E> {
-    claim_schema()
+    unknown_codec(decode_claim, encode_claim)
   }
 }
 
+// ── suites ──────────────────────────────────────────────────────────────────────────────────
+
+/// A suite's `cases`: case name -> claim.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SuiteCases(pub BTreeMap<String, Claim>);
+
+impl HasSchema for SuiteCases {
+  type A = Self;
+  type I = Unknown;
+  type E = ();
+
+  fn schema() -> Schema<Self, Unknown> {
+    let cases = record(Claim::schema());
+    let ast = cases.ast().clone();
+    unknown_codec(
+      move |u| cases.decode_unknown_all(u).map(SuiteCases),
+      |c: SuiteCases| Unknown::Object(c.0.into_iter().map(|(k, c)| (k, encode_claim(c))).collect()),
+    )
+    .with_ast(ast)
+  }
+}
+
+/// An assay suite: `{ name, cases = { <case> = <claim>; }; }` (`name` and other keys unread).
+#[derive(Debug, Clone, Schema)]
+pub struct AssaySuite {
+  pub cases: SuiteCases,
+}
+
+/// One nix-unit / `lib.runTests` case: `{ expr, expected }` (both Nix source).
+#[derive(Debug, Clone, Schema)]
+struct CompatCaseWire {
+  expr: NixSource,
+  expected: NixSource,
+}
+
+/// Decode a claim from a JSON value (fail-fast: the first issue).
+pub fn decode_claim_json(value: &Value) -> Result<Claim, ParseError> {
+  Claim::schema().decode_unknown(&unknown_from_serde_json(value.clone()))
+}
+
+/// Encode a claim to a JSON value.
+pub fn encode_claim_json(claim: &Claim) -> Value {
+  serde_json_from_unknown(&Claim::schema().encode(claim.clone()))
+}
+
+/// Decode an assay suite into its named claims (by case name), reporting every issue.
+pub fn decode_suite(value: &Value) -> Result<Vec<(String, Claim)>, ParseErrors> {
+  AssaySuite::schema()
+    .decode_unknown_all(&unknown_from_serde_json(value.clone()))
+    .map(|suite| suite.cases.0.into_iter().collect())
+}
+
+/// Decode a nix-unit / `lib.runTests` suite (`{ <case> = { expr; expected; }; }`), reporting
+/// every issue.
+pub fn decode_compat_cases(value: &Value) -> Result<Vec<CompatCase>, ParseErrors> {
+  record(CompatCaseWire::schema())
+    .decode_unknown_all(&unknown_from_serde_json(value.clone()))
+    .map(|cases| {
+      cases
+        .into_iter()
+        .map(|(name, case)| CompatCase {
+          name,
+          expr: case.expr.0,
+          expected: case.expected.0,
+        })
+        .collect()
+    })
+}
+
+/// `invalid suite, N error(s):` and one indented `path: message` line per issue.
+pub fn describe_issues(errors: &ParseErrors) -> String {
+  let n = errors.issues.len();
+  let mut out = format!("invalid suite, {n} error{}:", if n == 1 { "" } else { "s" });
+  for issue in &errors.issues {
+    let path = if issue.path.is_empty() {
+      "(suite)"
+    } else {
+      issue.path.as_str()
+    };
+    out.push_str(&format!("\n  {path}: {}", issue.message));
+  }
+  out
+}
+
 #[cfg(test)]
+// Tests parse JSON fixtures directly; production decoding goes through `Schema`.
+#[cfg_attr(dylint_lib = "id_effect_lints", allow(schema_parsing_at_io_boundary))]
 mod tests {
   use super::*;
   use serde_json::json;
@@ -421,6 +624,23 @@ mod tests {
     let encoded = encode_claim_json(&claim);
     let decoded = decode_claim_json(&encoded).expect("decode round-trip");
     assert_eq!(decoded, claim);
+    let all = Claim::schema()
+      .decode_unknown_all(&unknown_from_serde_json(encoded))
+      .expect("decode_unknown_all round-trip");
+    assert_eq!(all, claim);
+  }
+
+  fn decode(value: Value) -> Claim {
+    decode_claim_json(&value).expect("decode")
+  }
+
+  /// `path: message` of every issue.
+  fn issues(errors: &ParseErrors) -> Vec<String> {
+    errors
+      .issues
+      .iter()
+      .map(|e| format!("{}: {}", e.path, e.message))
+      .collect()
   }
 
   #[test]
@@ -437,6 +657,10 @@ mod tests {
       left: json!(2),
       right: json!(2),
     });
+    round_trip(Claim::EqValues {
+      left: json!(null),
+      right: json!({"a": [1, 2.5, "x"]}),
+    });
   }
 
   #[test]
@@ -448,10 +672,74 @@ mod tests {
   }
 
   #[test]
+  fn throws_without_pattern_round_trips() {
+    round_trip(Claim::Throws {
+      expr: "builtins.throw \"x\"".into(),
+      pattern: None,
+    });
+    let encoded = encode_claim_json(&Claim::Throws {
+      expr: "x".into(),
+      pattern: None,
+    });
+    assert!(encoded.get("pattern").is_none());
+  }
+
+  #[test]
   fn subset_claim_round_trips() {
     round_trip(Claim::Subset {
       expr: "{ a = 1; }".into(),
       expected_subset: json!({"a": 1}),
+    });
+    round_trip(Claim::SubsetValues {
+      actual: json!({"a": 1}),
+      expected_subset: json!({"a": 1}),
+    });
+  }
+
+  #[test]
+  fn has_attrs_claims_round_trip() {
+    round_trip(Claim::HasAttrs {
+      expr: "{ a = 1; }".into(),
+      attrs: vec!["a".into()],
+    });
+    round_trip(Claim::HasAttrsValues {
+      actual: json!({"a": 1}),
+      attrs: vec!["a".into()],
+    });
+  }
+
+  #[test]
+  fn drv_claims_round_trip() {
+    round_trip(Claim::Drv {
+      expr: "pkgs.hello.drvPath".into(),
+      project: vec!["name".into()],
+      expected: json!({"name": "hello"}),
+    });
+    round_trip(Claim::DrvValues {
+      actual: json!({
+          "type": "derivation",
+          "name": "hello-2.12.3",
+          "outPath": "/nix/store/abc-hello-2.12.3"
+      }),
+      project: vec!["name".into(), "outPath".into()],
+      expected: json!({"name": "hello-2.12.3"}),
+    });
+  }
+
+  #[test]
+  fn snapshot_forces_module_round_trip() {
+    round_trip(Claim::Snapshot {
+      name: "snap".into(),
+      expr: "1".into(),
+    });
+    round_trip(Claim::Forces {
+      expr: "x".into(),
+      paths: vec!["p".into()],
+    });
+    round_trip(Claim::Module {
+      imports_expr: "[]".into(),
+      args_expr: "{}".into(),
+      expect: json!({"ok": true}),
     });
   }
 
@@ -474,40 +762,6 @@ mod tests {
   }
 
   #[test]
-  fn fixture_suite_cases_decode_via_schema() {
-    let v = json!({
-        "cases": {
-            "add": { "claim": "eq", "expr": "1 + 1", "expected": "2" },
-            "law": { "claim": "law", "name": "merge_identity", "seed": 1 }
-        }
-    });
-    let cases = decode_suite_cases(v.get("cases").unwrap()).expect("decode cases");
-    assert_eq!(cases.len(), 2);
-    assert!(matches!(cases[0].1, Claim::Eq { .. }));
-    assert!(matches!(cases[1].1, Claim::Law { .. }));
-  }
-  #[test]
-  fn subset_values_claim_round_trips() {
-    round_trip(Claim::SubsetValues {
-      actual: json!({"a": 1}),
-      expected_subset: json!({"a": 1}),
-    });
-  }
-
-  #[test]
-  fn drv_values_claim_round_trips() {
-    round_trip(Claim::DrvValues {
-      actual: json!({
-          "type": "derivation",
-          "name": "hello-2.12.3",
-          "outPath": "/nix/store/abc-hello-2.12.3"
-      }),
-      project: vec!["name".into(), "outPath".into()],
-      expected: json!({"name": "hello-2.12.3"}),
-    });
-  }
-
-  #[test]
   fn path_info_claim_round_trips() {
     round_trip(Claim::PathInfo {
       path: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a".into(),
@@ -515,133 +769,91 @@ mod tests {
       referrers: true,
       closure_size: true,
     });
+    let plain = Claim::PathInfo {
+      path: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a".into(),
+      expect: json!({}),
+      referrers: false,
+      closure_size: false,
+    };
+    round_trip(plain.clone());
+    let encoded = encode_claim_json(&plain);
+    assert!(encoded.get("referrers").is_none());
+    assert!(encoded.get("closureSize").is_none());
+    assert!(encoded.get("closure_size").is_none());
   }
 
   #[test]
-  fn drv_expr_claim_round_trips() {
-    round_trip(Claim::Drv {
-      expr: "pkgs.hello.drvPath".into(),
-      project: vec!["name".into()],
-      expected: json!({"name": "hello"}),
-    });
-  }
-
-  #[test]
-  fn hasattrs_values_claim_round_trips() {
-    round_trip(Claim::HasAttrsValues {
-      actual: json!({"a": 1}),
-      attrs: vec!["a".into()],
-    });
-  }
-
-  #[test]
-  fn decode_claim_json_rejects_unknown() {
-    assert!(decode_claim_json(&json!({"claim": "nope"})).is_err());
-    assert!(decode_claim_json(&json!({"claim": "eq"})).is_err());
-  }
-
-  #[test]
-  fn value_mode_eq_uses_actual_key() {
-    let encoded = encode_claim_json(&Claim::EqValues {
-      left: json!(1),
-      right: json!(2),
-    });
-    assert!(encoded.get("actual").is_some());
-    let decoded = decode_claim_json(&encoded).expect("decode");
-    assert!(matches!(decoded, Claim::EqValues { .. }));
-  }
-
-  #[test]
-  fn throws_without_pattern_round_trips() {
-    round_trip(Claim::Throws {
-      expr: "builtins.throw \"x\"".into(),
-      pattern: None,
-    });
-  }
-
-  #[test]
-  fn snapshot_forces_module_round_trip() {
-    round_trip(Claim::Snapshot {
-      name: "snap".into(),
-      expr: "1".into(),
-    });
-    round_trip(Claim::Forces {
-      expr: "x".into(),
-      paths: vec!["p".into()],
-    });
-    round_trip(Claim::Module {
-      imports_expr: "[]".into(),
-      args_expr: "{}".into(),
-      expect: json!({"ok": true}),
-    });
-  }
-
-  #[test]
-  fn hasattrs_expr_mode_round_trips() {
-    round_trip(Claim::HasAttrs {
-      expr: "{ a = 1; }".into(),
-      attrs: vec!["a".into()],
-    });
-  }
-
-  #[test]
-  fn decode_suite_cases_rejects_non_object() {
-    assert!(decode_suite_cases(&json!([])).is_err());
-  }
-
-  #[test]
-  fn decode_field_helper_errors() {
-    use id_effect::schema::unknown_from_serde_json;
-    let bad = unknown_from_serde_json(json!({"claim": 1}));
-    assert!(decode_claim_json(&json!({"claim": 1})).is_err());
-    assert!(decode_claim_json(&json!({"claim": "eq"})).is_err());
-    assert!(decode_claim_json(&json!({"claim": "law", "name": "x"})).is_err());
-    assert!(decode_claim_json(&json!({"claim": "prop", "name": "x", "seed": -1})).is_err());
-    assert!(
-      decode_claim_json(&json!({"claim": "prop", "name": "x", "seed": 1, "trials": 9999999999i64}))
-        .is_err()
-    );
-    assert!(
-      decode_claim_json(&json!({"claim": "prop", "name": "x", "seed": 1, "trials": "lots"}))
-        .is_err()
-    );
-    assert!(decode_claim_json(&json!({"claim": "hasAttrs", "expr": "x", "attrs": [1]})).is_err());
-    assert!(decode_claim_json(&json!({"claim": "subset", "actual": {}})).is_err());
-    let _ = bad;
-  }
-
-  #[test]
-  fn claim_schema_has_schema_trait() {
-    let _ = Claim::schema();
-  }
-
-  #[test]
-  fn unknown_to_json_f64_nan_becomes_null() {
-    use id_effect::schema::Unknown;
-    let nan = Unknown::F64(f64::NAN);
-    assert_eq!(unknown_to_json(&nan), Value::Null);
-  }
-
-  #[test]
-  fn unknown_to_json_covers_all_variants() {
-    use id_effect::schema::Unknown;
-    assert_eq!(unknown_to_json(&Unknown::Bool(true)), Value::Bool(true));
-    assert_eq!(unknown_to_json(&Unknown::I64(3)), Value::Number(3.into()));
+  fn dsl_value_mode_claims_decode() {
     assert_eq!(
-      unknown_to_json(&Unknown::F64(1.5)),
-      Value::Number(serde_json::Number::from_f64(1.5).unwrap())
+      decode(json!({"claim": "eq", "actual": 2, "expected": 2})),
+      Claim::EqValues {
+        left: json!(2),
+        right: json!(2)
+      }
     );
     assert_eq!(
-      unknown_to_json(&Unknown::Array(vec![Unknown::Null])),
-      json!([null])
+      decode(json!({"claim": "subset", "actual": {"a": 1, "b": 2}, "expected": {"a": 1}})),
+      Claim::SubsetValues {
+        actual: json!({"a": 1, "b": 2}),
+        expected_subset: json!({"a": 1}),
+      }
     );
     assert_eq!(
-      unknown_to_json(&Unknown::Object(BTreeMap::from([(
-        "k".into(),
-        Unknown::String("v".into()),
-      )]))),
-      json!({"k": "v"})
+      decode(json!({"claim": "hasAttrs", "actual": {"a": 1}, "attrs": ["a"]})),
+      Claim::HasAttrsValues {
+        actual: json!({"a": 1}),
+        attrs: vec!["a".into()],
+      }
     );
+    assert!(matches!(
+      decode(json!({"claim": "drv", "actual": {}, "project": [], "expected": {}})),
+      Claim::DrvValues { .. }
+    ));
+  }
+
+  #[test]
+  fn json_literals_in_source_fields_become_nix_source() {
+    assert_eq!(
+      decode(json!({"claim": "eq", "expr": 42, "expected": [1, "a"]})),
+      Claim::Eq {
+        left_expr: "42".into(),
+        right_expr: "[1 \"a\"]".into(),
+      }
+    );
+    assert_eq!(
+      decode(json!({"claim": "throws", "expr": "x", "pattern": null})),
+      Claim::Throws {
+        expr: "x".into(),
+        pattern: None
+      }
+    );
+  }
+
+  #[test]
+  fn path_info_reads_both_closure_size_spellings() {
+    let snake = decode(json!({
+        "claim": "pathInfo", "path": "/nix/store/x-a", "expect": {}, "closure_size": true
+    }));
+    assert!(matches!(
+      snake,
+      Claim::PathInfo {
+        closure_size: true,
+        referrers: false,
+        ..
+      }
+    ));
+    let camel = decode(json!({
+        "claim": "pathInfo", "path": "/nix/store/x-a", "expect": {}, "closureSize": true,
+        "referrers": true
+    }));
+    assert!(matches!(
+      camel,
+      Claim::PathInfo {
+        closure_size: true,
+        referrers: true,
+        ..
+      }
+    ));
   }
 
   #[test]
@@ -654,41 +866,318 @@ mod tests {
   }
 
   #[test]
-  fn prop_optional_trials_null_and_valid() {
-    let without = decode_claim_json(&json!({
-        "claim": "prop",
-        "name": "gen_int",
-        "seed": 1
-    }))
-    .expect("decode");
-    assert!(matches!(without, Claim::Prop { trials: None, .. }));
-    let encoded = encode_claim_json(&without);
-    assert!(encoded.get("trials").is_none());
-
-    let with_valid = decode_claim_json(&json!({
-        "claim": "prop",
-        "name": "gen_int",
-        "seed": 1,
-        "trials": 42
-    }))
-    .expect("decode");
-    assert!(matches!(
-      with_valid,
-      Claim::Prop {
-        trials: Some(42),
-        ..
-      }
-    ));
+  fn claim_errors_name_the_field() {
+    let err = |v: Value| {
+      let e = decode_claim_json(&v).expect_err("invalid claim");
+      format!("{}: {}", e.path, e.message)
+    };
+    assert_eq!(
+      err(json!({"claim": "nope"})),
+      format!("claim: unknown claim \"nope\", expected one of {CLAIM_KINDS}")
+    );
+    assert_eq!(
+      err(json!({"claim": 1})),
+      format!("claim: expected a string, one of {CLAIM_KINDS}")
+    );
+    assert_eq!(
+      err(json!({"expr": "1"})),
+      format!("claim: missing field, one of {CLAIM_KINDS}")
+    );
+    assert_eq!(err(json!("not-object")), ": expected a claim object");
+    assert_eq!(err(json!({"claim": "eq"})), "expr: missing field");
+    assert_eq!(
+      err(json!({"claim": "law", "name": "x"})),
+      "seed: missing field"
+    );
+    assert_eq!(
+      err(json!({"claim": "prop", "name": "x", "seed": -1})),
+      "seed: expected a non-negative integer"
+    );
+    assert_eq!(
+      err(json!({"claim": "prop", "name": "x", "seed": 1, "trials": 9_999_999_999i64})),
+      "trials: expected an integer in 0..=4294967295"
+    );
+    assert_eq!(
+      err(json!({"claim": "prop", "name": "x", "seed": 1, "trials": "lots"})),
+      "trials: expected i64"
+    );
+    assert_eq!(
+      err(json!({"claim": "hasAttrs", "expr": "x", "attrs": [1]})),
+      "attrs.0: expected string"
+    );
+    assert_eq!(
+      err(json!({"claim": "subset", "actual": {}})),
+      "expected: missing field"
+    );
   }
 
   #[test]
-  fn throws_null_pattern_decodes_as_none() {
-    let decoded = decode_claim_json(&json!({
-        "claim": "throws",
-        "expr": "builtins.throw \"x\"",
-        "pattern": null
+  fn suite_decodes_cases_by_name() {
+    let v = json!({
+        "name": "fixture",
+        "cases": {
+            "law": { "claim": "law", "name": "merge_identity", "seed": 1 },
+            "add": { "claim": "eq", "expr": "1 + 1", "expected": "2" }
+        }
+    });
+    let cases = decode_suite(&v).expect("decode suite");
+    let names: Vec<_> = cases.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["add", "law"]);
+    assert!(matches!(cases[0].1, Claim::Eq { .. }));
+    assert!(matches!(cases[1].1, Claim::Law { .. }));
+  }
+
+  #[test]
+  fn suite_shape_errors() {
+    let errs = |v: Value| issues(&decode_suite(&v).expect_err("invalid suite"));
+    assert_eq!(errs(json!([])), [": expected object"]);
+    assert_eq!(errs(json!({"name": "t"})), ["cases: missing field"]);
+    assert_eq!(
+      errs(json!({"cases": []})),
+      ["cases: expected object for record"]
+    );
+  }
+
+  /// `tests/fixtures/malformed.assay.json`: every broken case is reported, with its path.
+  #[test]
+  fn malformed_suite_reports_every_error_with_its_path() {
+    let fixture: Value =
+      serde_json::from_str(include_str!("../../tests/fixtures/malformed.assay.json"))
+        .expect("fixture is JSON");
+    let errors = decode_suite(&fixture).expect_err("malformed suite");
+    assert_eq!(
+      issues(&errors),
+      [
+        "cases.badAttrs.attrs.1: expected string".to_owned(),
+        format!("cases.badKind.claim: unknown claim \"equals\", expected one of {CLAIM_KINDS}"),
+        "cases.badProp.name: missing field".to_owned(),
+        "cases.badProp.seed: expected i64".to_owned(),
+        "cases.badProp.trials: expected an integer in 0..=4294967295".to_owned(),
+        "cases.badSeed.seed: expected a non-negative integer".to_owned(),
+        "cases.noExpected.expected: missing field".to_owned(),
+      ]
+    );
+    let described = describe_issues(&errors);
+    assert!(described.starts_with("invalid suite, 7 errors:\n  cases.badAttrs.attrs.1: "));
+  }
+
+  #[test]
+  fn describe_issues_names_the_root() {
+    let one = ParseErrors::one(ParseError::new("", "expected object"));
+    assert_eq!(
+      describe_issues(&one),
+      "invalid suite, 1 error:\n  (suite): expected object"
+    );
+  }
+
+  #[test]
+  fn compat_cases_decode_and_report_every_error() {
+    let cases = decode_compat_cases(&json!({
+        "b": { "expr": 42, "expected": "42" },
+        "a": { "expr": "1 + 1", "expected": "2" }
     }))
-    .expect("decode");
-    assert!(matches!(decoded, Claim::Throws { pattern: None, .. }));
+    .expect("compat");
+    assert_eq!(
+      cases,
+      [
+        CompatCase {
+          name: "a".into(),
+          expr: "1 + 1".into(),
+          expected: "2".into()
+        },
+        CompatCase {
+          name: "b".into(),
+          expr: "42".into(),
+          expected: "42".into()
+        },
+      ]
+    );
+    let errors = decode_compat_cases(&json!({
+        "x": "not-object",
+        "y": { "expected": "1" },
+        "z": { "expr": "1" }
+    }))
+    .expect_err("invalid");
+    assert_eq!(
+      issues(&errors),
+      [
+        "x: expected object",
+        "y.expr: missing field",
+        "z.expected: missing field"
+      ]
+    );
+  }
+
+  /// Wire-level generators for every claim shape, and the codec round trip over them.
+  mod property {
+    use id_effect::testing::property::{
+      arb_unknown, from_schema, prop_assert_roundtrip, unknown_object,
+    };
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+    use proptest::strategy::Union;
+    use proptest::test_runner::TestCaseError;
+
+    use super::*;
+
+    type Field = (&'static str, BoxedStrategy<Unknown>);
+
+    fn tag(kind: &'static str) -> Field {
+      ("claim", Just(Unknown::String(kind.into())).boxed())
+    }
+
+    fn text() -> BoxedStrategy<Unknown> {
+      "[ -~]{0,12}".prop_map(Unknown::String).boxed()
+    }
+
+    /// Nix source: a string, or any JSON (rendered as a Nix literal on decode).
+    fn source() -> BoxedStrategy<Unknown> {
+      prop_oneof![text(), arb_unknown()].boxed()
+    }
+
+    fn value() -> BoxedStrategy<Unknown> {
+      arb_unknown().boxed()
+    }
+
+    fn names() -> BoxedStrategy<Unknown> {
+      vec("[a-z.]{1,6}", 0..4)
+        .prop_map(|v| Unknown::Array(v.into_iter().map(Unknown::String).collect()))
+        .boxed()
+    }
+
+    fn natural(max: i64) -> BoxedStrategy<Unknown> {
+      (0..=max).prop_map(Unknown::I64).boxed()
+    }
+
+    fn flag() -> BoxedStrategy<Unknown> {
+      any::<bool>().prop_map(Unknown::Bool).boxed()
+    }
+
+    fn object(fields: Vec<Field>) -> BoxedStrategy<Unknown> {
+      unknown_object(fields).boxed()
+    }
+
+    /// One wire per claim shape (both modes of the value-mode kinds, optional fields set and
+    /// unset, both `closureSize` spellings).
+    fn arb_claim_wire() -> impl Strategy<Value = Unknown> {
+      Union::new(vec![
+        object(vec![tag("eq"), ("expr", source()), ("expected", source())]),
+        object(vec![tag("eq"), ("actual", value()), ("expected", value())]),
+        object(vec![tag("throws"), ("expr", source())]),
+        object(vec![tag("throws"), ("expr", source()), ("pattern", text())]),
+        object(vec![
+          tag("subset"),
+          ("expr", source()),
+          ("expected", value()),
+        ]),
+        object(vec![
+          tag("subset"),
+          ("actual", value()),
+          ("expected", value()),
+        ]),
+        object(vec![
+          tag("hasAttrs"),
+          ("expr", source()),
+          ("attrs", names()),
+        ]),
+        object(vec![
+          tag("hasAttrs"),
+          ("actual", value()),
+          ("attrs", names()),
+        ]),
+        object(vec![
+          tag("drv"),
+          ("expr", source()),
+          ("project", names()),
+          ("expected", value()),
+        ]),
+        object(vec![
+          tag("drv"),
+          ("actual", value()),
+          ("project", names()),
+          ("expected", value()),
+        ]),
+        object(vec![tag("snapshot"), ("name", text()), ("expr", source())]),
+        object(vec![tag("forces"), ("expr", source()), ("paths", names())]),
+        object(vec![
+          tag("module"),
+          ("imports", source()),
+          ("args", source()),
+          ("expect", value()),
+        ]),
+        object(vec![
+          tag("law"),
+          ("name", text()),
+          ("seed", natural(i64::MAX)),
+        ]),
+        object(vec![
+          tag("prop"),
+          ("name", text()),
+          ("seed", natural(i64::MAX)),
+        ]),
+        object(vec![
+          tag("prop"),
+          ("name", text()),
+          ("seed", natural(i64::MAX)),
+          ("trials", natural(i64::from(u32::MAX))),
+        ]),
+        object(vec![tag("pathInfo"), ("path", text()), ("expect", value())]),
+        object(vec![
+          tag("pathInfo"),
+          ("path", text()),
+          ("expect", value()),
+          ("referrers", flag()),
+          ("closureSize", flag()),
+        ]),
+        object(vec![
+          tag("pathInfo"),
+          ("path", text()),
+          ("expect", value()),
+          ("closure_size", flag()),
+        ]),
+      ])
+    }
+
+    proptest! {
+      #[test]
+      fn every_claim_kind_round_trips(claim in from_schema(Claim::schema(), arb_claim_wire())) {
+        let schema = Claim::schema();
+        prop_assert_roundtrip(&schema, claim.clone())?;
+        // The accumulating decoder (suite loads) agrees with the fail-fast one.
+        let all = schema
+          .decode_unknown_all(&schema.encode(claim.clone()))
+          .map_err(|e| TestCaseError::fail(describe_issues(&e)))?;
+        prop_assert_eq!(all, claim);
+      }
+
+      #[test]
+      fn suites_of_any_claims_decode_every_case(
+        claims in proptest::collection::btree_map(
+          "[a-z]{1,6}",
+          from_schema(Claim::schema(), arb_claim_wire()),
+          0..6,
+        )
+      ) {
+        let suite = serde_json_from_unknown(&Unknown::Object(BTreeMap::from([(
+          "cases".to_owned(),
+          SuiteCases::schema().encode(SuiteCases(claims.clone())),
+        )])));
+        let decoded = decode_suite(&suite).map_err(|e| TestCaseError::fail(describe_issues(&e)))?;
+        prop_assert_eq!(decoded, claims.into_iter().collect::<Vec<_>>());
+      }
+    }
+  }
+
+  #[test]
+  fn claim_schema_has_schema_trait() {
+    let wire = Claim::schema().encode(Claim::Law {
+      name: "n".into(),
+      seed: 1,
+    });
+    assert!(matches!(wire, Unknown::Object(_)));
+    assert!(matches!(
+      SuiteCases::schema().encode(SuiteCases(BTreeMap::new())),
+      Unknown::Object(_)
+    ));
   }
 }

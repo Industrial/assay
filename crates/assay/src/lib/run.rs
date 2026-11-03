@@ -1,34 +1,85 @@
-//! Run assay suites and collect `Exit` outcomes.
+//! Run assay suites and collect each case's `Exit`.
+//!
+//! A run first evaluates every batchable claim in one `nix` process ([`run_batch`]), then runs
+//! the other cases in parallel with [`for_each_par`] under `Concurrency::Bounded(jobs)` (default:
+//! the machine's parallelism). Each such case may be retried (`--retry-flaky-eval`: a bounded
+//! [`Schedule`], transient I/O failures only) and is bounded by `--case-timeout-ms`
+//! (`timeout_fail` -> [`InfraError::Timeout`], the attempt is interrupted and its `nix` killed).
+//! Waits and deadlines use the fiber's executor clock; nothing here reads the wall clock.
 
-use std::path::Path;
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
-use id_effect::concurrency::FiberHandle;
-use id_effect::runtime::{ThreadSleepRuntime, run_blocking, run_fork};
-use id_effect::{Cap, Cause, Effect, Exit, Needs};
+use id_effect::{Concurrency, Effect, Exit, Schedule, effect, for_each_par, need};
 use serde::Serialize;
 
 use crate::assay_suite::load_assay_suite;
 use crate::batch::{partition_cases, run_batch};
-use crate::caps::NixEvaluatorKey;
-use crate::caps::{AssayEnv, NixWorkerPoolKey, SnapshotStoreKey};
-use crate::claims::Claim;
+use crate::caps::{AssayEnv, FsService, NixEvalService, SuiteEnv};
+use crate::claims::{Claim, ClaimCaps, claim_caps, interpret_with};
 use crate::compat::load_compat_suite;
-use crate::discover::{SuiteKind, discover_suites, suite_kind};
+use crate::discover::{SuiteFile, SuiteKind, discover_suites, suite_kind};
+use crate::eval::NixEval;
+use crate::files::{EntryKind, Fs};
 use crate::outcome::AssayOutcome;
-use crate::timeout::interpret_claim_with_retry;
-use crate::verdict::{CaseVerdict, InfraError, exit_to_outcome};
+use crate::verdict::{CaseVerdict, InfraError, case_exit_byte, exit_to_outcome};
+
+/// Retries after the first attempt under `--retry-flaky-eval` (so 3 attempts at most).
+pub const FLAKY_EVAL_RETRIES: u64 = 2;
+/// Delay before each flaky-eval retry.
+pub const FLAKY_EVAL_DELAY: Duration = Duration::from_millis(1);
+
+/// Where `ASSAY_TRACE` progress notes go (an injected sink; off by default).
+#[derive(Clone, Default)]
+pub struct Trace(Option<TraceSink>);
+
+type TraceSink = Arc<dyn Fn(&str) + Send + Sync>;
+
+impl Trace {
+  /// A sink that receives every note.
+  pub fn to(sink: impl Fn(&str) + Send + Sync + 'static) -> Self {
+    Self(Some(Arc::new(sink)))
+  }
+
+  /// Hands `note` to the sink, if any.
+  pub fn note(&self, note: String) {
+    if let Some(sink) = &self.0 {
+      sink(&note);
+    }
+  }
+}
+
+impl fmt::Debug for Trace {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(if self.0.is_some() {
+      "Trace(on)"
+    } else {
+      "Trace(off)"
+    })
+  }
+}
 
 #[derive(Debug, Clone)]
 pub struct RunOptions {
+  /// `--update-snapshots` (applied at the edge, where the snapshot store is built).
   pub update_snapshots: bool,
   pub json_output: bool,
   /// Per-case timeout budget in milliseconds (`None` = no limit).
   pub case_timeout_ms: Option<u64>,
-  /// Retry flaky nix eval via `retry_with_clock` (default off).
+  /// Retry transient eval failures ([`FLAKY_EVAL_RETRIES`] times, default off).
   pub retry_flaky_eval: bool,
   /// Collapse batchable claims into one `nix eval` via `tryEval` (default on).
   pub batch_eval: bool,
+  /// How many cases (and suite loads) run at once.
+  pub jobs: usize,
+  pub trace: Trace,
+}
+
+/// The default parallelism: the machine's available parallelism (4 when unknown).
+pub fn default_jobs() -> usize {
+  std::thread::available_parallelism().map_or(4, |n| n.get())
 }
 
 impl Default for RunOptions {
@@ -39,13 +90,37 @@ impl Default for RunOptions {
       case_timeout_ms: None,
       retry_flaky_eval: false,
       batch_eval: true,
+      jobs: default_jobs(),
+      trace: Trace::default(),
     }
   }
 }
 
+/// Every case of a run with its `Exit`, sorted by case name.
 #[derive(Debug, Clone)]
 pub struct SuiteReport {
   pub outcomes: Vec<(String, Exit<CaseVerdict, InfraError>)>,
+}
+
+impl SuiteReport {
+  /// The run's exit code: the worst case (see [`case_exit_byte`]); `0` for no cases.
+  pub fn exit_byte(&self) -> u8 {
+    self
+      .outcomes
+      .iter()
+      .map(|(_, exit)| case_exit_byte(exit))
+      .max()
+      .unwrap_or(0)
+  }
+
+  /// The legacy per-case outcomes, in report order.
+  pub fn legacy_outcomes(&self) -> Vec<(String, AssayOutcome)> {
+    self
+      .outcomes
+      .iter()
+      .map(|(name, exit)| (name.clone(), exit_to_outcome(exit.clone())))
+      .collect()
+  }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
@@ -56,241 +131,175 @@ pub struct RunSummary {
   pub errored: usize,
 }
 
+type NamedExit = (String, Exit<CaseVerdict, InfraError>);
+
+/// `assay run <path>`: [`run_discovered`] when `path` is a directory, else [`run_suite`].
+pub fn run_path(path: &Path, opts: &RunOptions) -> Effect<SuiteReport, InfraError, AssayEnv> {
+  let (path, opts) = (path.to_path_buf(), opts.clone());
+  claim_caps().flat_map(move |caps| {
+    caps
+      .fs
+      .kind(&path)
+      .flat_map(move |kind| {
+        if kind == Some(EntryKind::Dir) {
+          run_discovered_with(caps, path, opts)
+        } else {
+          run_suite_with(caps, path, opts)
+        }
+      })
+      .any_env()
+  })
+}
+
+/// Runs the suite file at `path`. A suite that cannot be loaded fails the run.
 pub fn run_suite(path: &Path, opts: &RunOptions) -> Effect<SuiteReport, InfraError, AssayEnv> {
+  let (path, opts) = (path.to_path_buf(), opts.clone());
+  claim_caps().flat_map(move |caps| run_suite_with(caps, path, opts).any_env())
+}
+
+/// [`run_suite`] over explicit capability values.
+pub fn run_suite_with(
+  caps: ClaimCaps,
+  path: PathBuf,
+  opts: RunOptions,
+) -> Effect<SuiteReport, InfraError> {
+  let trace = opts.trace.clone();
+  load_suite_cases(&caps.eval, &caps.fs, &path)
+    .flat_map(move |cases| {
+      trace.note(format!("load_suite ({} cases)", cases.len()));
+      run_cases(cases, caps, opts)
+    })
+    .map(|outcomes| SuiteReport { outcomes })
+}
+
+/// Discovers every suite under `root`, loads them in parallel and runs all their cases as one
+/// run (one batch for all batchable claims); case names are prefixed with the suite path.
+pub fn run_discovered(root: &Path, opts: &RunOptions) -> Effect<SuiteReport, InfraError, AssayEnv> {
+  let (root, opts) = (root.to_path_buf(), opts.clone());
+  claim_caps().flat_map(move |caps| run_discovered_with(caps, root, opts).any_env())
+}
+
+/// [`run_discovered`] over explicit capability values.
+pub fn run_discovered_with(
+  caps: ClaimCaps,
+  root: PathBuf,
+  opts: RunOptions,
+) -> Effect<SuiteReport, InfraError> {
+  let jobs = Concurrency::Bounded(opts.jobs.max(1));
+  let (eval, fs) = (Arc::clone(&caps.eval), Arc::clone(&caps.fs));
+  effect!({
+    let suites = ~discover_suites(&caps.fs, &root);
+    let load = move |suite: SuiteFile| {
+      let prefix = suite.path.display().to_string();
+      load_suite_cases(&eval, &fs, &suite.path).map(move |cases| {
+        cases
+          .into_iter()
+          .map(|(name, claim)| (format!("{prefix}::{name}"), claim))
+          .collect::<Vec<_>>()
+      })
+    };
+    let loaded = ~for_each_par(suites, load, jobs);
+    let outcomes = ~run_cases(loaded.into_iter().flatten().collect(), caps, opts);
+    SuiteReport { outcomes }
+  })
+}
+
+/// [`load_suite_cases`] with the capabilities from [`SuiteEnv`].
+pub fn load_suite(path: &Path) -> Effect<Vec<(String, Claim)>, InfraError, SuiteEnv> {
   let path = path.to_path_buf();
-  let opts = opts.clone();
-  Effect::new(move |env| run_suite_on_env(&path, &opts, env))
+  need::<NixEvalService>().flat_map(move |eval: Arc<NixEvalService>| {
+    need::<FsService>()
+      .flat_map(move |fs: Arc<FsService>| load_suite_cases(&eval.0, &fs.0, &path).any_env())
+  })
 }
 
-fn apply_snapshot_update(env: &mut AssayEnv, update: bool) {
-  if update {
-    let updated = env.get::<Cap<SnapshotStoreKey>>().clone().with_update(true);
-    env.insert::<Cap<SnapshotStoreKey>>(updated);
-  }
-}
-
-fn load_suite_cases(path: &Path, env: &AssayEnv) -> Result<Vec<(String, Claim)>, InfraError> {
-  // Suite load is a nix eval — share the worker pool with claim evals.
-  let pool = Needs::<NixWorkerPoolKey>::need(env);
-  let _slot = pool.acquire()?;
-  let kind = suite_kind(path).unwrap_or(SuiteKind::CompatJson);
-  match kind {
-    SuiteKind::CompatJson | SuiteKind::CompatNix => load_compat_cases(path),
-    SuiteKind::AssayNix => load_assay_suite(path).map_err(|e| InfraError::SuiteLoad(e.to_string())),
-  }
-}
-
-fn run_suite_on_env(
+/// The cases of one suite file (its kind decides the loader): `.nix` suites are evaluated with
+/// `eval`, `.json` suites read with `fs`.
+pub fn load_suite_cases(
+  eval: &Arc<dyn NixEval>,
+  fs: &Arc<dyn Fs>,
   path: &Path,
-  opts: &RunOptions,
-  env: &mut AssayEnv,
-) -> Result<SuiteReport, InfraError> {
-  apply_snapshot_update(env, opts.update_snapshots);
-  let t0 = std::time::Instant::now();
-  let cases = load_suite_cases(path, env)?;
-  if std::env::var_os("ASSAY_TRACE").is_some() {
-    eprintln!(
-      "assay_trace: load_suite {:.1}ms ({} cases)",
-      t0.elapsed().as_secs_f64() * 1000.0,
-      cases.len()
-    );
+) -> Effect<Vec<(String, Claim)>, InfraError> {
+  match suite_kind(path).unwrap_or(SuiteKind::CompatJson) {
+    SuiteKind::CompatJson | SuiteKind::CompatNix => {
+      load_compat_suite(Arc::clone(eval), Arc::clone(fs), path).map(|suite| {
+        suite
+          .cases
+          .into_iter()
+          .map(|c| {
+            (
+              c.name,
+              Claim::Eq {
+                left_expr: c.expr,
+                right_expr: c.expected,
+              },
+            )
+          })
+          .collect()
+      })
+    }
+    SuiteKind::AssayNix => load_assay_suite(Arc::clone(eval), Arc::clone(fs), path),
   }
-  let t1 = std::time::Instant::now();
-  let report = run_cases_on_env(cases, opts, env)?;
-  if std::env::var_os("ASSAY_TRACE").is_some() {
-    eprintln!(
-      "assay_trace: run_cases {:.1}ms",
-      t1.elapsed().as_secs_f64() * 1000.0
-    );
-  }
-  Ok(report)
 }
 
-fn run_cases_on_env(
+/// Runs `cases`: the batchable ones in one batch, the rest in parallel; sorted by name.
+pub fn run_cases(
   cases: Vec<(String, Claim)>,
-  opts: &RunOptions,
-  env: &mut AssayEnv,
-) -> Result<SuiteReport, InfraError> {
-  let retry = opts.retry_flaky_eval;
-  let timeout_ms = opts.case_timeout_ms;
-
+  caps: ClaimCaps,
+  opts: RunOptions,
+) -> Effect<Vec<NamedExit>, InfraError> {
   let (batchable, isolated) = if opts.batch_eval {
     partition_cases(cases)
   } else {
     (Vec::new(), cases)
   };
-
-  let mut outcomes = Vec::new();
-
-  if !batchable.is_empty() {
-    let pool = Needs::<NixWorkerPoolKey>::need(env);
-    let _slot = pool.acquire()?;
-    let eval = Needs::<NixEvaluatorKey>::need(env);
-    let store = Needs::<SnapshotStoreKey>::need(env);
-    outcomes.extend(run_batch(&batchable, eval.as_ref(), store)?);
-  }
-
-  if !isolated.is_empty() {
-    // Fabric construct is cheap after ComputeSupervisor lazy telemetry init.
-    let rt = ThreadSleepRuntime::default();
-
-    struct PendingCase {
-      name: String,
-      case: FiberHandle<CaseVerdict, InfraError>,
-      timeout: Option<FiberHandle<CaseVerdict, InfraError>>,
-    }
-
-    let mut pending = Vec::with_capacity(isolated.len());
-    for (name, claim) in isolated {
-      let env_clone = env.clone();
-      let case_name = name.clone();
-      let case_handle = run_fork(&rt, move || {
-        (interpret_claim_with_retry(claim, retry), env_clone)
-      });
-      let timeout_handle = timeout_ms.map(|limit_ms| spawn_timeout_fiber(&rt, case_name, limit_ms));
-      pending.push(PendingCase {
-        name,
-        case: case_handle,
-        timeout: timeout_handle,
-      });
-    }
-
-    for p in pending {
-      let exit = match p.timeout {
-        Some(timeout) => race_case_or_timeout(p.case, timeout),
-        None => {
-          let exit = run_blocking(p.case.await_exit(), ()).expect("await_exit is infallible");
-          let _ = p.case.interrupt();
-          exit
-        }
-      };
-      outcomes.push((p.name, exit));
-    }
-  }
-
-  outcomes.sort_by(|a, b| a.0.cmp(&b.0));
-  Ok(SuiteReport { outcomes })
-}
-
-fn race_case_or_timeout(
-  case: FiberHandle<CaseVerdict, InfraError>,
-  timeout: FiberHandle<CaseVerdict, InfraError>,
-) -> Exit<CaseVerdict, InfraError> {
-  loop {
-    if let Some(result) = case.poll_result() {
-      let _ = timeout.interrupt();
-      return match result {
-        Ok(v) => Exit::succeed(v),
-        Err(c) => Exit::Failure(c),
-      };
-    }
-    if let Some(result) = timeout.poll_result() {
-      let _ = case.interrupt();
-      return match result {
-        Ok(v) => Exit::succeed(v),
-        Err(c) => Exit::Failure(c),
-      };
-    }
-    std::thread::yield_now();
-  }
-}
-
-fn spawn_timeout_fiber(
-  rt: &ThreadSleepRuntime,
-  case: String,
-  limit_ms: u64,
-) -> FiberHandle<CaseVerdict, InfraError> {
-  run_fork(rt, move || {
-    (
-      Effect::new(move |_| {
-        std::thread::sleep(Duration::from_millis(limit_ms));
-        Err(InfraError::Timeout {
-          case: case.clone(),
-          limit_ms,
-        })
-      }),
-      (),
+  let trace = opts.trace.clone();
+  run_batch(batchable, caps.clone(), opts.trace.clone()).flat_map(move |mut outcomes| {
+    let jobs = Concurrency::Bounded(opts.jobs.max(1));
+    for_each_par(
+      isolated,
+      move |(name, claim)| run_case(&caps, name, claim, &opts),
+      jobs,
     )
+    .map(move |isolated| {
+      outcomes.extend(isolated);
+      outcomes.sort_by(|a, b| a.0.cmp(&b.0));
+      trace.note(format!("run_cases ({} cases)", outcomes.len()));
+      outcomes
+    })
   })
 }
 
-fn load_compat_cases(path: &Path) -> Result<Vec<(String, Claim)>, InfraError> {
-  let suite = load_compat_suite(path).map_err(|e| InfraError::SuiteLoad(e.to_string()))?;
-  Ok(
-    suite
-      .cases
-      .into_iter()
-      .map(|c| {
-        (
-          c.name,
-          Claim::Eq {
-            left_expr: c.expr,
-            right_expr: c.expected,
-          },
-        )
+/// One isolated case: retried and bounded per `opts`; never fails (its `Exit` is the value).
+fn run_case(
+  caps: &ClaimCaps,
+  name: String,
+  claim: Claim,
+  opts: &RunOptions,
+) -> Effect<NamedExit, InfraError> {
+  let caps = caps.clone();
+  let attempt = move || interpret_with(&caps, claim.clone());
+  let case = if opts.retry_flaky_eval {
+    let schedule = Schedule::spaced(FLAKY_EVAL_DELAY)
+      .intersect(Schedule::recurs(FLAKY_EVAL_RETRIES))
+      .while_input(InfraError::is_transient);
+    Effect::retry(attempt, schedule)
+  } else {
+    attempt()
+  };
+  let case = match opts.case_timeout_ms {
+    Some(limit_ms) => {
+      let case_name = name.clone();
+      case.timeout_fail(Duration::from_millis(limit_ms), move || {
+        InfraError::Timeout {
+          case: case_name,
+          limit_ms,
+        }
       })
-      .collect(),
-  )
-}
-
-pub fn run_discovered(root: &Path, opts: &RunOptions) -> Effect<SuiteReport, InfraError, AssayEnv> {
-  let root = root.to_path_buf();
-  let opts = opts.clone();
-  Effect::new(move |env| {
-    apply_snapshot_update(env, opts.update_snapshots);
-    let suite_opts = RunOptions {
-      update_snapshots: false,
-      ..opts.clone()
-    };
-
-    let suites = discover_suites(&root).map_err(|e| InfraError::Io(e.to_string()))?;
-    let rt = ThreadSleepRuntime::default();
-
-    // Phase 1: load every suite in parallel (pool-gated inside load_suite_cases).
-    let mut load_handles = Vec::with_capacity(suites.len());
-    for suite in suites {
-      let env_clone = env.clone();
-      let path = suite.path;
-      load_handles.push(run_fork(&rt, move || {
-        (
-          Effect::new(move |env| {
-            let prefix = path.display().to_string();
-            let cases = load_suite_cases(&path, env)?;
-            Ok(
-              cases
-                .into_iter()
-                .map(|(name, claim)| (format!("{prefix}::{name}"), claim))
-                .collect::<Vec<_>>(),
-            )
-          }),
-          env_clone,
-        )
-      }));
     }
-
-    let mut all_cases = Vec::new();
-    for handle in load_handles {
-      let exit = run_blocking(handle.await_exit(), ()).expect("await_exit is infallible");
-      let _ = handle.interrupt();
-      match exit {
-        Exit::Success(cases) => all_cases.extend(cases),
-        Exit::Failure(cause) => return Err(suite_fiber_infra(cause)),
-      }
-    }
-
-    // Phase 2: one mega-batch for all batchable claims + isolated fibers.
-    run_cases_on_env(all_cases, &suite_opts, env)
-  })
-}
-
-fn suite_fiber_infra(cause: Cause<InfraError>) -> InfraError {
-  match cause {
-    Cause::Fail(err) => err,
-    Cause::Die(msg) => InfraError::Worker(msg),
-    Cause::Interrupt(id) => InfraError::Worker(format!("interrupted suite fiber {id:?}")),
-    Cause::Both(left, _) => suite_fiber_infra(*left),
-    Cause::Then(_, right) => suite_fiber_infra(*right),
-  }
+    None => case,
+  };
+  case.exit::<InfraError>().map(move |exit| (name, exit))
 }
 
 pub fn summarize(report: &SuiteReport) -> RunSummary {
@@ -315,363 +324,374 @@ pub fn summarize_exits(outcomes: &[(String, Exit<CaseVerdict, InfraError>)]) -> 
   s
 }
 
-pub fn run_suite_blocking(
-  path: &Path,
-  opts: &RunOptions,
-  env: AssayEnv,
-) -> Result<SuiteReport, InfraError> {
-  run_blocking(run_suite(path, opts), env)
-}
-
 #[cfg(test)]
 mod tests {
-  use std::sync::Arc;
   use std::sync::atomic::{AtomicUsize, Ordering};
-  use std::time::Instant;
 
-  use id_effect::{Cap, FromEnv, TestClock, build_env, run_test, run_test_with_clock, succeed};
-  use serde_json::json;
+  use id_effect::{
+    Executor, TestExecutor, assert_exit_fail, expect_exit_success, run_test, run_test_on, sleep,
+  };
+  use serde_json::{Value, json};
 
   use super::*;
-  use crate::caps::{ClockKey, MockNixEval, NixEvaluatorKey, mock_providers};
-  use crate::claims::interpret_claim;
-  use crate::eval::{EvalBackend, EvalResult};
-  use crate::pool::{MockWorkerPool, NixWorkerPool};
+  use crate::eval::EvalResult;
+  use crate::fake::{MockNixEval, SyncEval, temp_snapshot_store};
 
-  fn mock_env_with_eval(eval: Arc<dyn EvalBackend + Send + Sync>) -> AssayEnv {
-    let mut env = build_env(mock_providers()).expect("env");
-    env.insert::<Cap<NixEvaluatorKey>>(eval);
-    AssayEnv::from_env(env)
+  fn caps(eval: impl NixEval + 'static) -> ClaimCaps {
+    ClaimCaps {
+      eval: Arc::new(eval),
+      snapshots: temp_snapshot_store(),
+      path_info: Arc::new(nixstore::MockPathInfoStore::default()),
+      fs: Arc::new(crate::fake::MemFs::default()),
+    }
+  }
+
+  fn eq(l: &str, r: &str) -> Claim {
+    Claim::Eq {
+      left_expr: l.into(),
+      right_expr: r.into(),
+    }
+  }
+
+  fn throws(expr: &str) -> Claim {
+    Claim::Throws {
+      expr: expr.into(),
+      pattern: None,
+    }
+  }
+
+  fn opts() -> RunOptions {
+    RunOptions {
+      jobs: 2,
+      ..RunOptions::default()
+    }
   }
 
   #[test]
-  fn parallel_cases_collect_all_sorted_by_name() {
-    static ORDER: AtomicUsize = AtomicUsize::new(0);
+  fn batched_and_isolated_cases_are_collected_sorted_by_name() {
+    let eval = MockNixEval::default();
+    eval.set("1", EvalResult::Ok(json!(1)));
+    eval.set("2", EvalResult::Ok(json!(2)));
+    let cases = vec![
+      ("c".to_string(), eq("1", "1")),
+      ("a".to_string(), throws("1")),
+      ("b".to_string(), eq("1", "2")),
+    ];
+    let mut no_batch = opts();
+    no_batch.batch_eval = false;
+    let out = expect_exit_success(run_test(run_cases(cases, caps(eval), no_batch)));
+    let names: Vec<_> = out.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["a", "b", "c"]);
+    assert!(matches!(out[2].1, Exit::Success(CaseVerdict::Pass)));
+    assert!(matches!(
+      out[1].1,
+      Exit::Success(CaseVerdict::AssertFail { .. })
+    ));
+  }
 
-    struct OrderEval;
-    impl EvalBackend for OrderEval {
-      fn eval_json(&self, expr: &str) -> EvalResult {
-        let _ = ORDER.fetch_add(1, Ordering::SeqCst);
-        let _ = expr;
-        // Batched eq expects a 2-element list.
-        EvalResult::Ok(json!([42, 42]))
+  /// An evaluator whose every evaluation takes `delay` (on the executor clock).
+  struct SlowEval(Duration);
+
+  impl NixEval for SlowEval {
+    fn eval_expr(&self, _expr: &str) -> Effect<Value, AssayOutcome> {
+      sleep(self.0).map(|()| json!([1, 1]))
+    }
+    fn eval_file(&self, _path: &Path) -> Effect<Value, AssayOutcome> {
+      sleep(self.0).map(|()| Value::Null)
+    }
+    fn eval_source(&self, _source: &str) -> Effect<Value, AssayOutcome> {
+      sleep(self.0).map(|()| Value::Null)
+    }
+  }
+
+  #[test]
+  fn case_timeout_is_a_timeout_failure_after_exactly_the_limit() {
+    let mut o = opts();
+    o.batch_eval = false;
+    o.case_timeout_ms = Some(50);
+    let exec = TestExecutor::new();
+    let start = exec.now();
+    let run = run_cases(
+      vec![("slow".to_string(), eq("1", "1"))],
+      caps(SlowEval(Duration::from_secs(60))),
+      o,
+    );
+    let out = expect_exit_success(run_test_on(&exec, run));
+    assert_eq!(exec.now() - start, Duration::from_millis(50));
+    assert_exit_fail(
+      &out[0].1,
+      &InfraError::Timeout {
+        case: "slow".into(),
+        limit_ms: 50,
+      },
+    );
+    assert_eq!(case_exit_byte(&out[0].1), 1);
+  }
+
+  /// Fails with `io` `failures` times, then evaluates `[1 1]`.
+  struct Flaky {
+    calls: AtomicUsize,
+    failures: usize,
+    kind: &'static str,
+  }
+
+  impl SyncEval for Flaky {
+    fn eval_json(&self, _expr: &str) -> EvalResult {
+      if self.calls.fetch_add(1, Ordering::SeqCst) < self.failures {
+        EvalResult::Err(AssayOutcome::EvalError {
+          kind: self.kind.into(),
+          message: "flaky".into(),
+          span: None,
+        })
+      } else {
+        EvalResult::Ok(json!([1, 1]))
       }
     }
+  }
 
-    let env = mock_env_with_eval(Arc::new(OrderEval));
-    let cases: Vec<(String, Claim)> = vec![
+  fn run_flaky(
+    failures: usize,
+    kind: &'static str,
+    retry: bool,
+  ) -> (Exit<CaseVerdict, InfraError>, usize, Duration) {
+    let eval = Arc::new(Flaky {
+      calls: AtomicUsize::new(0),
+      failures,
+      kind,
+    });
+    let mut o = opts();
+    o.batch_eval = false;
+    o.retry_flaky_eval = retry;
+    let caps = ClaimCaps {
+      eval: Arc::clone(&eval) as Arc<dyn NixEval>,
+      snapshots: temp_snapshot_store(),
+      path_info: Arc::new(nixstore::MockPathInfoStore::default()),
+      fs: Arc::new(crate::fake::MemFs::default()),
+    };
+    let exec = TestExecutor::new();
+    let start = exec.now();
+    let mut out = expect_exit_success(run_test_on(
+      &exec,
+      run_cases(vec![("x".to_string(), eq("a", "b"))], caps, o),
+    ));
+    (
+      out.remove(0).1,
+      eval.calls.load(Ordering::SeqCst),
+      exec.now() - start,
+    )
+  }
+
+  /// Each retry waits exactly [`FLAKY_EVAL_DELAY`] on the virtual clock.
+  #[test]
+  fn retry_flaky_eval_retries_transient_io_failures_at_most_twice() {
+    let (exit, calls, elapsed) = run_flaky(1, "io", true);
+    assert!(matches!(exit, Exit::Success(CaseVerdict::Pass)), "{exit:?}");
+    assert_eq!((calls, elapsed), (2, FLAKY_EVAL_DELAY));
+    let (exit, calls, elapsed) = run_flaky(2, "io", true);
+    assert!(matches!(exit, Exit::Success(CaseVerdict::Pass)), "{exit:?}");
+    assert_eq!((calls, elapsed), (3, FLAKY_EVAL_DELAY * 2));
+    let (exit, calls, elapsed) = run_flaky(5, "io", true);
+    assert_exit_fail(&exit, &InfraError::Io("flaky".into()));
+    assert_eq!((calls, elapsed), (3, FLAKY_EVAL_DELAY * 2));
+  }
+
+  #[test]
+  fn retry_is_off_by_default_and_skips_permanent_failures() {
+    let (exit, calls, elapsed) = run_flaky(1, "io", false);
+    assert_exit_fail(&exit, &InfraError::Io("flaky".into()));
+    assert_eq!((calls, elapsed), (1, Duration::ZERO));
+    let (exit, calls, elapsed) = run_flaky(1, "nix_missing", true);
+    assert!(matches!(exit, Exit::Failure(_)));
+    assert_eq!((calls, elapsed), (1, Duration::ZERO));
+  }
+
+  /// Retries of a slow, flaky case run inside its timeout: the deadline cuts the retries off at
+  /// exactly the limit.
+  #[test]
+  fn case_timeout_bounds_the_retries_too() {
+    struct SlowFlaky(AtomicUsize);
+    impl NixEval for SlowFlaky {
+      fn eval_expr(&self, _expr: &str) -> Effect<Value, AssayOutcome> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        sleep(Duration::from_millis(20)).flat_map(|()| {
+          id_effect::fail(AssayOutcome::EvalError {
+            kind: "io".into(),
+            message: "flaky".into(),
+            span: None,
+          })
+        })
+      }
+      fn eval_file(&self, _path: &Path) -> Effect<Value, AssayOutcome> {
+        id_effect::succeed(Value::Null)
+      }
+      fn eval_source(&self, _source: &str) -> Effect<Value, AssayOutcome> {
+        id_effect::succeed(Value::Null)
+      }
+    }
+    let eval = Arc::new(SlowFlaky(AtomicUsize::new(0)));
+    let mut o = opts();
+    o.batch_eval = false;
+    o.retry_flaky_eval = true;
+    o.case_timeout_ms = Some(30);
+    let mut caps = caps(MockNixEval::default());
+    caps.eval = Arc::clone(&eval) as Arc<dyn NixEval>;
+    let exec = TestExecutor::new();
+    let start = exec.now();
+    let out = expect_exit_success(run_test_on(
+      &exec,
+      run_cases(vec![("x".to_string(), eq("a", "b"))], caps, o),
+    ));
+    // Attempt 1 fails at 20ms, attempt 2 starts at 21ms and is interrupted at 30ms.
+    assert_eq!(exec.now() - start, Duration::from_millis(30));
+    assert_eq!(eval.0.load(Ordering::SeqCst), 2);
+    assert_exit_fail(
+      &out[0].1,
+      &InfraError::Timeout {
+        case: "x".into(),
+        limit_ms: 30,
+      },
+    );
+  }
+
+  #[test]
+  fn summarize_and_exit_byte_fold_every_case() {
+    let report = SuiteReport {
+      outcomes: vec![
+        ("p".into(), Exit::succeed(CaseVerdict::Pass)),
+        ("e".into(), Exit::fail(InfraError::Io("x".into()))),
+        (
+          "f".into(),
+          Exit::succeed(CaseVerdict::AssertFail {
+            claim: "eq".into(),
+            left: None,
+            right: None,
+            diff: String::new(),
+          }),
+        ),
+      ],
+    };
+    assert_eq!(
+      summarize(&report),
+      RunSummary {
+        total: 3,
+        passed: 1,
+        failed: 1,
+        errored: 1
+      }
+    );
+    assert_eq!(report.exit_byte(), 1);
+    assert_eq!(SuiteReport { outcomes: vec![] }.exit_byte(), 0);
+    let defect = SuiteReport {
+      outcomes: vec![("d".into(), Exit::die("bug"))],
+    };
+    assert_eq!(defect.exit_byte(), 101);
+  }
+
+  /// `slow` evaluates for a minute (on the executor clock); everything else is the mock's.
+  struct SlowFor {
+    slow: &'static str,
+    rest: MockNixEval,
+  }
+
+  impl NixEval for SlowFor {
+    fn eval_expr(&self, expr: &str) -> Effect<Value, AssayOutcome> {
+      if expr.contains(self.slow) {
+        return sleep(Duration::from_secs(60)).map(|()| json!([1, 1]));
+      }
+      self.rest.eval_expr(expr)
+    }
+    fn eval_file(&self, path: &Path) -> Effect<Value, AssayOutcome> {
+      self.rest.eval_file(path)
+    }
+    fn eval_source(&self, source: &str) -> Effect<Value, AssayOutcome> {
+      self.rest.eval_source(source)
+    }
+  }
+
+  /// One case per verdict family (pass, assertion failure, expected throw, eval error, I/O
+  /// failure, timeout, law), run through the run core; the `Exit` and the rendered reports are
+  /// goldens under `testdata/exits/` (`ID_EFFECT_BLESS=1` rewrites them).
+  #[test]
+  fn mixed_run_exit_and_reports_match_goldens() {
+    use id_effect::{assert_golden, assert_golden_exit};
+
+    use crate::report::{ReportFormat, render_report};
+
+    let mock = MockNixEval::default();
+    mock.set("1", EvalResult::Ok(json!(1)));
+    mock.set("2", EvalResult::Ok(json!({"a": [2]})));
+    let error = |kind: &str, message: &str| {
+      EvalResult::Err(AssayOutcome::EvalError {
+        kind: kind.into(),
+        message: message.into(),
+        span: None,
+      })
+    };
+    mock.set("boom", error("throw", "boom"));
+    mock.set(
+      "bad",
+      error("type", "value is a set while a list was expected"),
+    );
+    mock.set("spawn", error("io", "nix: spawn failed"));
+    let cases = vec![
+      ("eq_pass".to_string(), eq("1", "1")),
+      ("eq_fail".to_string(), eq("1", "2")),
+      ("throws_pass".to_string(), throws("boom")),
+      ("throws_fail".to_string(), throws("1")),
+      ("eval_error".to_string(), eq("bad", "1")),
+      ("io_error".to_string(), eq("spawn", "1")),
+      ("slow".to_string(), eq("slow", "1")),
       (
-        "z_last".into(),
-        Claim::Eq {
-          left_expr: "1".into(),
-          right_expr: "1".into(),
-        },
-      ),
-      (
-        "a_first".into(),
-        Claim::Eq {
-          left_expr: "1".into(),
-          right_expr: "1".into(),
-        },
-      ),
-      (
-        "m_mid".into(),
-        Claim::Eq {
-          left_expr: "1".into(),
-          right_expr: "1".into(),
+        "law".to_string(),
+        Claim::Law {
+          name: "merge_associativity".into(),
+          seed: 7,
         },
       ),
     ];
+    let mut o = opts();
+    o.batch_eval = false;
+    o.case_timeout_ms = Some(250);
+    let exec = TestExecutor::new();
+    let start = exec.now();
+    let exit = run_test_on(
+      &exec,
+      run_cases(
+        cases,
+        caps(SlowFor {
+          slow: "slow",
+          rest: mock,
+        }),
+        o,
+      ),
+    );
+    assert_eq!(exec.now() - start, Duration::from_millis(250));
+    assert_golden_exit("testdata/exits/mixed_run.exit", &exit);
 
-    let rt = ThreadSleepRuntime::default();
-    let mut handles = Vec::new();
-    for (name, claim) in cases {
-      let env_clone = env.clone();
-      let h = run_fork(&rt, move || (interpret_claim(claim), env_clone));
-      handles.push((name, h));
-    }
-    let mut outcomes = Vec::new();
-    for (name, h) in handles {
-      let exit = run_blocking(h.await_exit(), ()).expect("exit");
-      let _ = h.interrupt();
-      outcomes.push((name, exit));
-    }
-    outcomes.sort_by(|a, b| a.0.cmp(&b.0));
-
-    assert_eq!(outcomes[0].0, "a_first");
-    assert_eq!(outcomes[1].0, "m_mid");
-    assert_eq!(outcomes[2].0, "z_last");
-    assert_eq!(outcomes.len(), 3);
-    for (_, exit) in &outcomes {
-      assert!(matches!(exit, Exit::Success(CaseVerdict::Pass)));
-    }
-  }
-
-  #[test]
-  fn run_test_suite_no_leaked_fibers() {
-    let env = mock_env_with_eval(Arc::new(MockNixEval::default()));
-    let effect = Effect::new(move |env: &mut AssayEnv| {
-      let cases: Vec<(String, Claim)> = vec![
-        (
-          "b".into(),
-          Claim::Eq {
-            left_expr: "x".into(),
-            right_expr: "x".into(),
-          },
-        ),
-        (
-          "a".into(),
-          Claim::Eq {
-            left_expr: "y".into(),
-            right_expr: "y".into(),
-          },
-        ),
-      ];
-      let rt = ThreadSleepRuntime::default();
-      let mut handles = Vec::new();
-      for (name, claim) in cases {
-        let env_clone = env.clone();
-        handles.push((
-          name,
-          run_fork(&rt, move || (interpret_claim(claim), env_clone)),
-        ));
-      }
-      let mut outcomes = Vec::new();
-      for (name, h) in handles {
-        let exit = run_blocking(h.await_exit(), ()).expect("exit");
-        let _ = h.interrupt();
-        outcomes.push((name, exit));
-      }
-      outcomes.sort_by(|a, b| a.0.cmp(&b.0));
-      Ok(SuiteReport { outcomes })
-    });
-    let exit: Exit<SuiteReport, InfraError> = run_test(effect, env);
-    assert!(matches!(exit, Exit::Success(_)));
-  }
-
-  #[test]
-  fn timeout_race_returns_infra_error() {
-    let clock = TestClock::new(Instant::now());
-    let clock_key: ClockKey = Arc::new(clock.clone());
-
-    let slow = Arc::new(SlowEval);
-    let mut built = build_env(mock_providers()).expect("env");
-    built.insert::<Cap<NixEvaluatorKey>>(slow);
-    built.insert::<Cap<ClockKey>>(clock_key);
-    let env = AssayEnv::from_env(built);
-
-    let claim = Claim::Eq {
-      left_expr: "slow".into(),
-      right_expr: "slow".into(),
+    let report = SuiteReport {
+      outcomes: expect_exit_success(exit),
     };
-    let rt = ThreadSleepRuntime::default();
-    let case = run_fork(&rt, {
-      let env = env.clone();
-      move || (interpret_claim(claim), env)
-    });
-    let timeout = spawn_timeout_fiber(&rt, "slow_case".into(), 50);
-    let race_exit = race_case_or_timeout(case, timeout);
-    let _harness = run_test_with_clock(succeed::<(), InfraError, ()>(()), (), clock);
-
-    assert!(
-      matches!(
-        race_exit,
-        Exit::Failure(id_effect::Cause::Fail(InfraError::Timeout { .. }))
-      ),
-      "race_exit = {race_exit:?}"
-    );
-  }
-
-  struct SlowEval;
-  impl EvalBackend for SlowEval {
-    fn eval_json(&self, _expr: &str) -> EvalResult {
-      std::thread::sleep(Duration::from_millis(300));
-      EvalResult::Ok(json!(1))
+    assert_eq!(report.exit_byte(), 1);
+    let summary = summarize(&report);
+    for (format, ext) in [
+      (ReportFormat::Human, "human"),
+      (ReportFormat::Tap, "tap"),
+      (ReportFormat::Json, "json"),
+    ] {
+      let text = render_report(&report.legacy_outcomes(), format, &summary);
+      assert_golden(
+        format!("testdata/exits/mixed_report.{ext}"),
+        &text.unwrap_or_else(|e| format!("render error: {e}")),
+      );
     }
   }
 
   #[test]
-  fn mock_worker_pool_records_max_in_flight_under_parallel_acquire() {
-    let pool = Arc::new(MockWorkerPool::new(4));
-    pool.set_block_ms(30);
-    let rt = ThreadSleepRuntime::default();
-    let mut handles = Vec::new();
-    for _ in 0..3 {
-      let p = Arc::clone(&pool);
-      handles.push(run_fork(&rt, move || {
-        (
-          Effect::new(move |_| {
-            let _g = p.acquire()?;
-            Ok::<(), InfraError>(())
-          }),
-          (),
-        )
-      }));
-    }
-    for h in handles {
-      let _ = run_blocking(h.await_exit(), ()).expect("exit");
-      let _ = h.interrupt();
-    }
-    assert!(pool.max_in_flight() >= 2);
-  }
-
-  #[test]
-  fn succeed_smoke_for_run_suite_effect() {
-    let exit = run_test(
-      succeed::<SuiteReport, InfraError, ()>(SuiteReport { outcomes: vec![] }),
-      (),
-    );
-    assert!(matches!(exit, Exit::Success(_)));
-  }
-
-  #[test]
-  fn run_discovered_runs_suites_concurrently_under_pool() {
-    use std::fs;
-
-    let root = std::env::temp_dir().join(format!("assay_parallel_suites_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(root.join("a")).unwrap();
-    fs::create_dir_all(root.join("b")).unwrap();
-    fs::create_dir_all(root.join("c")).unwrap();
-    for name in ["a", "b", "c"] {
-      fs::write(
-        root.join(name).join("suite.json"),
-        r#"{"n":{"expr":"1","expected":"1"}}"#,
-      )
-      .unwrap();
-    }
-
-    let pool = Arc::new(MockWorkerPool::new(8));
-    pool.set_block_ms(30);
-    let mut built = build_env(mock_providers()).expect("env");
-    built.insert::<Cap<NixEvaluatorKey>>(Arc::new(MockNixEval::default()) as _);
-    built.insert::<Cap<crate::caps::NixWorkerPoolKey>>(pool.clone() as _);
-    let env = AssayEnv::from_env(built);
-
-    let report = run_blocking(
-      run_discovered(
-        &root,
-        &RunOptions {
-          batch_eval: false,
-          ..RunOptions::default()
-        },
-      ),
-      env,
-    )
-    .expect("discovered");
-    let _ = fs::remove_dir_all(&root);
-
-    assert_eq!(report.outcomes.len(), 3);
-    // Overlapping acquires across suite fibers — serial would peak at 1.
-    assert!(
-      pool.max_in_flight() >= 2,
-      "expected concurrent suite/case pool use, max_in_flight={}",
-      pool.max_in_flight()
-    );
-  }
-
-  #[test]
-  fn suite_fiber_infra_maps_all_cause_variants() {
-    use id_effect::Cause;
+  fn missing_suite_fails_the_run() {
+    let run = run_suite_with(caps(MockNixEval::default()), "/nonexistent".into(), opts());
     assert!(matches!(
-      suite_fiber_infra(Cause::Fail(InfraError::Io("x".into()))),
-      InfraError::Io(_)
-    ));
-    assert!(matches!(
-      suite_fiber_infra(Cause::Die("d".into())),
-      InfraError::Worker(_)
-    ));
-    assert!(matches!(
-      suite_fiber_infra(Cause::Interrupt(id_effect::FiberId::new(9))),
-      InfraError::Worker(_)
-    ));
-    let left = Cause::Fail(InfraError::SuiteLoad("a".into()));
-    let right = Cause::Fail(InfraError::Io("b".into()));
-    assert!(matches!(
-      suite_fiber_infra(Cause::Both(Box::new(left.clone()), Box::new(right.clone()))),
+      id_effect::expect_exit_failure(run_test(run)),
       InfraError::SuiteLoad(_)
     ));
-    assert!(matches!(
-      suite_fiber_infra(Cause::Then(Box::new(left), Box::new(right))),
-      InfraError::Io(_)
-    ));
-  }
-
-  #[test]
-  fn race_case_or_timeout_case_wins() {
-    let env = mock_env_with_eval(Arc::new(MockNixEval::default()));
-    let claim = Claim::Eq {
-      left_expr: "1".into(),
-      right_expr: "1".into(),
-    };
-    let rt = ThreadSleepRuntime::default();
-    let case = run_fork(&rt, {
-      let env = env.clone();
-      move || (interpret_claim(claim), env)
-    });
-    let timeout = spawn_timeout_fiber(&rt, "fast".into(), 5_000);
-    let exit = race_case_or_timeout(case, timeout);
-    assert!(matches!(exit, Exit::Success(CaseVerdict::Pass)));
-  }
-
-  #[test]
-  fn run_cases_on_env_batch_eval_path() {
-    let mock = Arc::new(MockNixEval::default());
-    mock.set("1", EvalResult::Ok(json!(1)));
-    let pool = Arc::new(MockWorkerPool::new(2));
-    let mut built = build_env(mock_providers()).expect("env");
-    built.insert::<Cap<NixEvaluatorKey>>(mock);
-    built.insert::<Cap<crate::caps::NixWorkerPoolKey>>(pool.clone() as _);
-    let mut env = AssayEnv::from_env(built);
-    let cases = vec![(
-      "eq".into(),
-      Claim::Eq {
-        left_expr: "1".into(),
-        right_expr: "1".into(),
-      },
-    )];
-    unsafe {
-      std::env::set_var("ASSAY_TRACE", "1");
-    }
-    let report = run_cases_on_env(
-      cases,
-      &RunOptions {
-        batch_eval: true,
-        ..RunOptions::default()
-      },
-      &mut env,
-    )
-    .expect("batch path");
-    unsafe {
-      std::env::remove_var("ASSAY_TRACE");
-    }
-    assert_eq!(report.outcomes.len(), 1);
-  }
-
-  #[test]
-  fn run_suite_on_env_trace_path() {
-    use std::fs;
-
-    let dir = std::env::temp_dir().join(format!("assay_suite_trace_{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("suite.json");
-    fs::write(&path, r#"{"eq": {"expr": "1", "expected": "1"}}"#).unwrap();
-
-    let mock = Arc::new(MockNixEval::default());
-    mock.set("1", EvalResult::Ok(json!(1)));
-    let pool = Arc::new(MockWorkerPool::new(2));
-    let mut built = build_env(mock_providers()).expect("env");
-    built.insert::<Cap<NixEvaluatorKey>>(mock);
-    built.insert::<Cap<crate::caps::NixWorkerPoolKey>>(pool);
-    let mut env = AssayEnv::from_env(built);
-    unsafe {
-      std::env::set_var("ASSAY_TRACE", "1");
-    }
-    let report = run_suite_on_env(&path, &RunOptions::default(), &mut env).expect("suite");
-    unsafe {
-      std::env::remove_var("ASSAY_TRACE");
-    }
-    let _ = fs::remove_dir_all(dir);
-    assert_eq!(report.outcomes.len(), 1);
   }
 }

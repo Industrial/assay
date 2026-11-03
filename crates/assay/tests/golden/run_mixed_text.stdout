@@ -1,0 +1,9 @@
+PASS badExpr
+FAIL eqFails
+  ~ $: 1 -> 2
+PASS passes
+FAIL throwsButDoesNot
+  expression evaluated successfully; expected throw
+PASS throwsWrongMessage
+
+3/5 passed, 2 failed, 0 errored

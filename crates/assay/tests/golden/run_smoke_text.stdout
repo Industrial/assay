@@ -1,0 +1,14 @@
+PASS add
+PASS attrGet
+PASS boolAnd
+PASS hasAttrsSmoke
+PASS listConcat
+PASS listLength
+PASS nullLit
+PASS stringConcat
+PASS subsetSmoke
+PASS throwsBoom
+PASS throwsType
+PASS typeOfInt
+
+12/12 passed, 0 failed, 0 errored

@@ -2,6 +2,7 @@
 name = "nixfetch"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 description = "nixfetch — fixed-output fetchurl/fetchgit download + flat/NAR hash verify"
 license.workspace = true
@@ -17,24 +18,37 @@ categories = ["development-tools", "command-line-utilities"]
 base64 = "0.22"
 clap = { version = "4.4", features = ["derive"] }
 hex = "0.4"
-nixdrv = { path = "../nixdrv", version = "0.2.1" }
+nixdrv = { path = "../nixdrv", version = "0.3.0" }
+nixstore = { path = "../nixstore", version = "0.3.0" }
+# Async client: it runs as a task on the id_effect (tokio) executor; `reqwest::blocking` would
+# panic inside the runtime and park an executor thread.
 reqwest = { version = "0.12", default-features = false, features = [
-  "blocking",
   "rustls-tls",
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "1.0"
+# `tokio::process` (git, killed when an attempt is dropped) and oneshot channels for the live
+# adapters; the runtime itself is id_effect's.
+tokio = { version = "1", default-features = false, features = [
+  "process",
+  "sync",
+] }
 
-id_effect = { version = "0.4.0", features = ["schema-serde"] }
-id_effect_macro = "0.4.0"
-id_effect_proc_macro = "0.4.0"
-id_effect_cli = { version = "0.4.0", optional = true }
+id_effect = "0.13.0"
+# The bin's run edge (`run_main`: Ctrl-C -> 130, defect -> 101); always linked.
+id_effect_cli = "0.13.0"
 
 [features]
 default = ["cli-exit"]
-cli-exit = ["dep:id_effect_cli"]
+# Kept for compatibility: id_effect_cli is no longer optional, so this is a no-op.
+cli-exit = []
+# Exposes the in-memory fakes (`MemFs`, `FakeHttp`, `FakeGit`) for dependents' tests.
+test-support = []
+
+[lints]
+workspace = true
 
 [lib]
 name = "nixfetch"

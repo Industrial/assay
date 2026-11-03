@@ -1,262 +1,363 @@
-//! Effect command programs for nixfetch.
+//! Effect programs for the nixfetch commands, and the typed outputs they render at the edge.
+//!
+//! Each command asks for exactly the capabilities it uses: `hash` / `verify` need
+//! [`PathIoEnv`], `fetch-url` [`FetchUrlEnv`], `fetch-git` [`FetchGitEnv`], and `store-path`
+//! nothing. Hashing, NAR serialization and store-path math are plain Rust.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use id_effect::{Effect, Needs};
-use serde_json::Value;
+use id_effect::{Effect, HNil, Never, effect, succeed, suspend};
+use nixdrv::DEFAULT_STORE_DIR;
+use nixstore::edge::from_result;
+use serde::Serialize;
 
-use crate::caps::{GitFetchKey, HttpFetchKey, NixfetchEnv, PathIoKey};
+use crate::caps::{
+  FetchGitEnv, FetchUrlEnv, Git, GitService, HttpService, PathIo, PathIoEnv, PathIoService,
+};
 use crate::error::InfraError;
-use crate::hash_parse::{ExpectedHash, parse_expected_hash, verify_digest};
-use crate::ingest::{hash_flat_bytes, hash_flat_path};
-use crate::nar::hash_path_recursive;
-use crate::verify::{digest_report, make_fixed_output_path};
+use crate::hash_parse::{
+  ExpectedHash, format_digest, format_hex, format_nix32, parse_expected_hash, verify_digest,
+};
+use crate::ingest::hash_flat_bytes;
+use crate::nar::hash_nar;
+use crate::resilience::{RetryPolicy, with_retry};
+use crate::verify::make_fixed_output_path;
 
-pub fn cmd_hash(path: PathBuf, recursive: bool) -> Effect<Value, InfraError, NixfetchEnv> {
-  Effect::new(move |_env| {
-    let digest = if recursive {
-      hash_path_recursive(&path)?
-    } else {
-      hash_flat_path(&path)?
-    };
-    Ok(Value::Object(digest_report(&digest)))
+/// Name prefix of the staging directories `fetch-git` checks out into.
+pub const STAGING_PREFIX: &str = ".nixfetch-git-";
+
+/// Pretty-printed JSON of a command output (no trailing newline).
+fn render_json<T: Serialize>(output: &T) -> Result<String, InfraError> {
+  serde_json::to_string_pretty(output).map_err(|e| InfraError::Render(e.to_string()))
+}
+
+// Every report keeps its fields in key order: the printed objects keep declaration order and
+// match the pre-0.13 (sorted-map) output byte for byte.
+
+/// A sha256 digest in its three spellings (`hash` output).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DigestReport {
+  pub hex: String,
+  pub nix32: String,
+  pub sri: String,
+}
+
+impl DigestReport {
+  pub fn of(digest: &[u8; 32]) -> Self {
+    Self {
+      hex: format_hex(digest),
+      nix32: format_nix32(digest),
+      sri: format_digest(digest),
+    }
+  }
+
+  /// Pretty-printed JSON (no trailing newline).
+  pub fn render(&self) -> Result<String, InfraError> {
+    render_json(self)
+  }
+}
+
+/// `verify` output: the digest that matched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VerifyReport {
+  pub hex: String,
+  pub matched: bool,
+  pub nix32: String,
+  pub sri: String,
+}
+
+impl VerifyReport {
+  fn matched(digest: &[u8; 32]) -> Self {
+    let d = DigestReport::of(digest);
+    Self {
+      hex: d.hex,
+      matched: true,
+      nix32: d.nix32,
+      sri: d.sri,
+    }
+  }
+
+  /// Pretty-printed JSON (no trailing newline).
+  pub fn render(&self) -> Result<String, InfraError> {
+    render_json(self)
+  }
+}
+
+/// `fetch-url` output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FetchUrlReport {
+  pub hex: String,
+  pub matched: bool,
+  pub nix32: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub out: Option<String>,
+  pub sri: String,
+  #[serde(rename = "storePath", skip_serializing_if = "Option::is_none")]
+  pub store_path: Option<String>,
+  pub url: String,
+}
+
+impl FetchUrlReport {
+  /// Pretty-printed JSON (no trailing newline).
+  pub fn render(&self) -> Result<String, InfraError> {
+    render_json(self)
+  }
+}
+
+/// `fetch-git` output; `out` is where the verified tree now is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FetchGitReport {
+  pub hex: String,
+  pub matched: bool,
+  pub nix32: String,
+  pub out: String,
+  pub rev: String,
+  pub sri: String,
+  #[serde(rename = "storePath", skip_serializing_if = "Option::is_none")]
+  pub store_path: Option<String>,
+  pub url: String,
+}
+
+impl FetchGitReport {
+  /// Pretty-printed JSON (no trailing newline).
+  pub fn render(&self) -> Result<String, InfraError> {
+    render_json(self)
+  }
+}
+
+/// `store-path` output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StorePathReport {
+  pub digest: DigestReport,
+  pub hash: String,
+  pub name: String,
+  pub path: String,
+}
+
+impl StorePathReport {
+  /// Pretty-printed JSON (no trailing newline).
+  pub fn render(&self) -> Result<String, InfraError> {
+    render_json(self)
+  }
+}
+
+/// The full store path of `name` for `digest` (`None` without a name).
+fn named_store_path(
+  name: Option<&str>,
+  recursive: bool,
+  digest: &[u8; 32],
+) -> Result<Option<String>, InfraError> {
+  name
+    .map(|n| {
+      make_fixed_output_path(n, recursive, digest, None).map(|sp| sp.full_path(DEFAULT_STORE_DIR))
+    })
+    .transpose()
+}
+
+/// The sha256 of `path`: of its bytes (flat) or of its NAR (`recursive`).
+pub fn digest_path(
+  io: Arc<dyn PathIo>,
+  path: PathBuf,
+  recursive: bool,
+) -> Effect<[u8; 32], InfraError> {
+  if recursive {
+    io.read_tree(&path).map(|tree| hash_nar(&tree))
+  } else {
+    io.read_file(&path).map(|bytes| hash_flat_bytes(&bytes))
+  }
+}
+
+/// `hash`: the digest of `path` (flat or recursive).
+pub fn hash(path: PathBuf, recursive: bool) -> Effect<DigestReport, InfraError, PathIoEnv> {
+  effect!({
+    let io = ~PathIoService;
+    let digest = ~digest_path(Arc::clone(&io.0), path, recursive);
+    DigestReport::of(&digest)
   })
 }
 
-pub fn cmd_verify(
+/// `verify`: `path` hashes to `expected` (else `HashMismatch`).
+pub fn verify(
   path: PathBuf,
   expected: String,
   recursive: bool,
-) -> Effect<Value, InfraError, NixfetchEnv> {
-  Effect::new(move |_env| {
+) -> Effect<VerifyReport, InfraError, PathIoEnv> {
+  effect!({
     let want = parse_expected_hash(&expected)?;
-    let digest = if recursive {
-      hash_path_recursive(&path)?
-    } else {
-      hash_flat_path(&path)?
-    };
+    let io = ~PathIoService;
+    let digest = ~digest_path(Arc::clone(&io.0), path, recursive);
     verify_digest(&want, &digest)?;
-    let mut report = digest_report(&digest);
-    report.insert("matched".into(), Value::Bool(true));
-    Ok(Value::Object(report))
+    VerifyReport::matched(&digest)
   })
 }
 
-pub fn cmd_fetch_url(
+/// `fetch-url`: downloads `url` (retried per `policy`), flat-verifies it against `expected`
+/// and only then writes it to `out`.
+pub fn fetch_url(
   url: String,
   expected: String,
   out: Option<PathBuf>,
   name: Option<String>,
-) -> Effect<Value, InfraError, NixfetchEnv> {
-  Effect::new(move |env| {
-    let http = Needs::<HttpFetchKey>::need(env);
-    let io = Needs::<PathIoKey>::need(env);
+  policy: RetryPolicy,
+) -> Effect<FetchUrlReport, InfraError, FetchUrlEnv> {
+  effect!({
     let want = parse_expected_hash(&expected)?;
-    let bytes = http.get(&url)?;
+    let http = Arc::clone(&(~HttpService).0);
+    let io = Arc::clone(&(~PathIoService).0);
+    let target = url.clone();
+    let bytes = ~with_retry(format!("GET {url}"), policy, move || http.get(&target));
     let digest = hash_flat_bytes(&bytes);
-    if let Some(ref path) = out {
-      io.write_file(path, &bytes)?;
-    }
     verify_digest(&want, &digest)?;
-    let mut report = digest_report(&digest);
-    report.insert("matched".into(), Value::Bool(true));
-    report.insert("url".into(), Value::String(url.clone()));
-    if let Some(ref path) = out {
-      report.insert("out".into(), Value::String(path.display().to_string()));
+    if let Some(path) = &out {
+      ~io.write_file(path, bytes);
     }
-    if let Some(ref n) = name {
-      let sp = make_fixed_output_path(n, false, &digest, None)?;
-      report.insert(
-        "storePath".into(),
-        Value::String(sp.full_path(nixdrv::DEFAULT_STORE_DIR)),
-      );
+    let store_path = named_store_path(name.as_deref(), false, &digest)?;
+    let d = DigestReport::of(&digest);
+    FetchUrlReport {
+      hex: d.hex,
+      matched: true,
+      nix32: d.nix32,
+      out: out.map(|p| p.display().to_string()),
+      sri: d.sri,
+      store_path,
+      url,
     }
-    Ok(Value::Object(report))
   })
 }
 
-pub fn cmd_fetch_git(
+/// `fetch-git`: checks `url` at `rev` out (retried per `policy`), recursive-verifies the tree
+/// (without `.git`) against `expected` and moves it to `dest` (default:
+/// `$TMPDIR/nixfetch-git-<nix32>`). See [`checkout_verified`].
+pub fn fetch_git(
   url: String,
   rev: String,
   expected: String,
   dest: Option<PathBuf>,
   name: Option<String>,
-) -> Effect<Value, InfraError, NixfetchEnv> {
-  Effect::new(move |env| {
-    let git = Needs::<GitFetchKey>::need(env);
+  policy: RetryPolicy,
+) -> Effect<FetchGitReport, InfraError, FetchGitEnv> {
+  effect!({
     let want = parse_expected_hash(&expected)?;
-    let dest_path = dest.unwrap_or_else(|| {
-      std::env::temp_dir().join(format!(
-        "nixfetch-git-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-          .duration_since(std::time::UNIX_EPOCH)
-          .map(|d| d.as_nanos())
-          .unwrap_or(0)
-      ))
-    });
-    let tree = git.export(&url, &rev, &dest_path)?;
-    let digest = hash_path_recursive(&tree)?;
-    verify_digest(&want, &digest)?;
-    let mut report = digest_report(&digest);
-    report.insert("matched".into(), Value::Bool(true));
-    report.insert("url".into(), Value::String(url.clone()));
-    report.insert("rev".into(), Value::String(rev.clone()));
-    report.insert("out".into(), Value::String(tree.display().to_string()));
-    if let Some(ref n) = name {
-      let sp = make_fixed_output_path(n, true, &digest, None)?;
-      report.insert(
-        "storePath".into(),
-        Value::String(sp.full_path(nixdrv::DEFAULT_STORE_DIR)),
-      );
+    let git = Arc::clone(&(~GitService).0);
+    let io = Arc::clone(&(~PathIoService).0);
+    let (out, digest) = ~checkout_verified(git, io, url.clone(), rev.clone(), want, dest, policy);
+    let store_path = named_store_path(name.as_deref(), true, &digest)?;
+    let d = DigestReport::of(&digest);
+    FetchGitReport {
+      hex: d.hex,
+      matched: true,
+      nix32: d.nix32,
+      out: out.display().to_string(),
+      rev,
+      sri: d.sri,
+      store_path,
+      url,
     }
-    Ok(Value::Object(report))
   })
 }
 
-pub fn cmd_store_path(
+/// The directory a staging dir for `dest` goes in (same filesystem, so the final move is a
+/// rename).
+fn parent_of(dest: &Path) -> PathBuf {
+  match dest.parent() {
+    Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+    _ => PathBuf::from("."),
+  }
+}
+
+/// Removes `dir`, ignoring failures (a finalizer cannot fail).
+fn remove_quietly(io: Arc<dyn PathIo>, dir: PathBuf) -> Effect<(), Never> {
+  io.remove_all(&dir).catch(|_| succeed(()))
+}
+
+/// Checks `url@rev` out into a fresh staging directory next to the destination, strips
+/// `.git`, NAR-hashes the tree and verifies it against `want`; only a verified tree is moved to
+/// `dest` (replacing what was there). The staging directory is a scope finalizer: it is removed
+/// however this ends (success, failure, defect or interrupt), so a mismatching or half-cloned
+/// tree never survives.
+pub fn checkout_verified(
+  git: Arc<dyn Git>,
+  io: Arc<dyn PathIo>,
+  url: String,
+  rev: String,
+  want: ExpectedHash,
+  dest: Option<PathBuf>,
+  policy: RetryPolicy,
+) -> Effect<(PathBuf, [u8; 32]), InfraError> {
+  Effect::scoped(move |scope| -> Effect<(PathBuf, [u8; 32]), InfraError> {
+    effect!({
+      let parent = match &dest {
+        Some(d) => parent_of(d),
+        None => ~io.temp_root(),
+      };
+      ~io.create_dir_all(&parent);
+      let staging = ~io.make_temp_dir(&parent, STAGING_PREFIX);
+      ~scope.add_finalizer::<InfraError, HNil>(remove_quietly(Arc::clone(&io), staging.clone()));
+      let tree = staging.join("tree");
+      let attempt = {
+        let (git, io, tree, url, rev) = (git, Arc::clone(&io), tree.clone(), url.clone(), rev.clone());
+        move || {
+          let (git, tree, url, rev) = (Arc::clone(&git), tree.clone(), url.clone(), rev.clone());
+          // A failed attempt may leave a partial checkout behind.
+          io.remove_all(&tree)
+            .flat_map(move |()| git.checkout(&url, &rev, &tree))
+        }
+      };
+      ~with_retry(format!("git checkout {url} {rev}"), policy, attempt);
+      ~io.remove_all(&tree.join(".git"));
+      let node = ~io.read_tree(&tree);
+      let digest = hash_nar(&node);
+      verify_digest(&want, &digest)?;
+      let target = match dest {
+        Some(d) => d,
+        None => parent.join(format!("nixfetch-git-{}", format_nix32(&digest))),
+      };
+      ~io.remove_all(&target);
+      ~io.rename(&tree, &target);
+      (target, digest)
+    })
+  })
+}
+
+/// The `store-path` output for `name` and a full digest `expected`.
+pub fn store_path_report(
+  name: &str,
+  expected: &str,
+  recursive: bool,
+  store_dir: Option<&str>,
+) -> Result<StorePathReport, InfraError> {
+  let digest = match parse_expected_hash(expected)? {
+    ExpectedHash::Digest(d) => d,
+    ExpectedHash::Compressed(_) => {
+      return Err(InfraError::Parse(
+        "store-path requires full digest (SRI or hex), not nix32 alone".into(),
+      ));
+    }
+  };
+  let sp = make_fixed_output_path(name, recursive, &digest, store_dir)?;
+  let dir = store_dir.unwrap_or(DEFAULT_STORE_DIR);
+  Ok(StorePathReport {
+    digest: DigestReport::of(&digest),
+    path: sp.full_path(dir),
+    hash: sp.hash,
+    name: sp.name,
+  })
+}
+
+/// `store-path`: needs nothing.
+pub fn store_path(
   name: String,
   expected: String,
   recursive: bool,
   store_dir: Option<String>,
-) -> Effect<Value, InfraError, NixfetchEnv> {
-  Effect::new(move |_env| {
-    let want = parse_expected_hash(&expected)?;
-    let digest = match want {
-      ExpectedHash::Digest(d) => d,
-      ExpectedHash::Compressed(_) => {
-        return Err(InfraError::Parse(
-          "store-path requires full digest (SRI or hex), not nix32 alone".into(),
-        ));
-      }
-    };
-    let sp = make_fixed_output_path(&name, recursive, &digest, store_dir.as_deref())?;
-    let dir = store_dir.as_deref().unwrap_or(nixdrv::DEFAULT_STORE_DIR);
-    Ok(serde_json::json!({
-        "hash": sp.hash,
-        "name": sp.name,
-        "path": sp.full_path(dir),
-        "digest": Value::Object(digest_report(&digest)),
-    }))
+) -> Effect<StorePathReport, InfraError> {
+  suspend(move || {
+    from_result(store_path_report(
+      &name,
+      &expected,
+      recursive,
+      store_dir.as_deref(),
+    ))
   })
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-  use crate::caps::{MockGitFetch, MockHttpFetch, mock_env_with, mock_providers};
-  use crate::hash_parse::{format_digest, format_nix32};
-  use crate::ingest::hash_flat_bytes;
-  use id_effect::{Exit, FromEnv, build_env, run_test};
-  use std::sync::Arc;
-
-  #[test]
-  fn cmd_hash_flat_fixture() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/flat/hello");
-    let env = NixfetchEnv::from_env(build_env(mock_providers()).expect("env"));
-    let v = match run_test(cmd_hash(path, false), env) {
-      Exit::Success(v) => v,
-      other => panic!("hash failed: {other:?}"),
-    };
-    assert_eq!(
-      v.get("hex").and_then(|x| x.as_str()).unwrap(),
-      "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-    );
-  }
-
-  #[test]
-  fn cmd_verify_match_and_mismatch() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/flat/hello");
-    let env = NixfetchEnv::from_env(build_env(mock_providers()).expect("env"));
-    let dig = hash_flat_bytes(b"hello");
-    let ok = run_test(
-      cmd_verify(path.clone(), format_digest(&dig), false),
-      env.clone(),
-    );
-    assert!(matches!(ok, Exit::Success(_)));
-
-    let bad = run_test(cmd_verify(path, format_digest(&[0u8; 32]), false), env);
-    assert!(matches!(bad, Exit::Failure(_)));
-  }
-
-  #[test]
-  fn cmd_hash_recursive_golden() {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/nar/tree");
-    let env = NixfetchEnv::from_env(build_env(mock_providers()).expect("env"));
-    let v = match run_test(cmd_hash(path, true), env) {
-      Exit::Success(v) => v,
-      other => panic!("nar hash failed: {other:?}"),
-    };
-    assert_eq!(
-      v.get("nix32").and_then(|x| x.as_str()).unwrap(),
-      "0d0228wgvwp1443zlgfwd88kpzprzbsg5ifr6ikicg76ymwcy7lx"
-    );
-  }
-
-  #[test]
-  fn cmd_fetch_url_mock() {
-    let http = Arc::new(MockHttpFetch::default());
-    http.set("https://example.com/a", b"hello");
-    let git = Arc::new(MockGitFetch::default());
-    let env = mock_env_with(http, git);
-    let dig = hash_flat_bytes(b"hello");
-    let v = match run_test(
-      cmd_fetch_url(
-        "https://example.com/a".into(),
-        format_digest(&dig),
-        None,
-        Some("pkg".into()),
-      ),
-      env,
-    ) {
-      Exit::Success(v) => v,
-      other => panic!("fetch-url failed: {other:?}"),
-    };
-    assert_eq!(v.get("matched"), Some(&Value::Bool(true)));
-    assert!(v.get("storePath").is_some());
-  }
-
-  #[test]
-  fn cmd_fetch_git_mock() {
-    let http = Arc::new(MockHttpFetch::default());
-    let git = Arc::new(MockGitFetch::default());
-    let tree = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/nar/tree");
-    git.set("https://git.example/repo.git", "deadbeef", &tree);
-    let env = mock_env_with(http, git);
-    let dig = hash_path_recursive(&tree).unwrap();
-    let dest = std::env::temp_dir().join(format!("nixfetch-cmd-git-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dest);
-    let v = match run_test(
-      cmd_fetch_git(
-        "https://git.example/repo.git".into(),
-        "deadbeef".into(),
-        format_nix32(&dig),
-        Some(dest.clone()),
-        Some("src".into()),
-      ),
-      env,
-    ) {
-      Exit::Success(v) => v,
-      other => panic!("fetch-git failed: {other:?}"),
-    };
-    assert_eq!(v.get("matched"), Some(&Value::Bool(true)));
-    let _ = std::fs::remove_dir_all(&dest);
-  }
-
-  #[test]
-  fn cmd_store_path_rejects_compressed_nix32() {
-    let env = NixfetchEnv::from_env(build_env(mock_providers()).expect("env"));
-    let dig = hash_flat_bytes(b"hello");
-    let compressed = nixdrv::nix_base32_encode(&nixdrv::compress_hash(&dig));
-    let bad = run_test(
-      cmd_store_path("n".into(), compressed, false, None),
-      env.clone(),
-    );
-    assert!(matches!(bad, Exit::Failure(_)));
-    let ok = run_test(
-      cmd_store_path("n".into(), format_digest(&dig), false, None),
-      env,
-    );
-    assert!(matches!(ok, Exit::Success(_)));
-  }
 }

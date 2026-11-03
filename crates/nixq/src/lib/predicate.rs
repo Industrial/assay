@@ -1,4 +1,4 @@
-//! JSON subset / attribute checks — Traversal-shaped folds over [`serde_json::Value`].
+//! JSON subset / attribute checks — pure folds over [`serde_json::Value`].
 
 use serde_json::Value;
 
@@ -33,79 +33,6 @@ pub fn value_has_attrs(value: &Value, attrs: &[String]) -> bool {
     _ => false,
   }
 }
-
-#[cfg(feature = "optics")]
-mod traversal_impl {
-  use super::fold_object_keys;
-  use id_effect_optics::traversal::Traversal;
-  use serde_json::Value;
-
-  /// Traversal over immediate JSON object keys.
-  pub fn object_keys_traversal() -> Traversal<Value, String> {
-    Traversal::new(
-      |value, mut f| {
-        if let Value::Object(map) = value {
-          let updated: serde_json::Map<String, Value> =
-            map.into_iter().map(|(k, v)| (f(k), v)).collect();
-          Value::Object(updated)
-        } else {
-          value
-        }
-      },
-      |value, visit| {
-        fold_object_keys(value, |k| visit(k.to_string()));
-      },
-    )
-  }
-
-  /// `hasAttrs` via optics traversal — mirrors [`super::value_has_attrs`].
-  pub fn value_has_attrs_via_traversal(value: &Value, attrs: &[String]) -> bool {
-    if attrs.is_empty() {
-      return true;
-    }
-    let keys: std::collections::HashSet<String> =
-      object_keys_traversal().to_vec(value).into_iter().collect();
-    attrs.iter().all(|a| keys.contains(a))
-  }
-
-  #[cfg(test)]
-  mod traversal_tests {
-    use super::*;
-    use crate::optics::value_has_attrs;
-
-    #[test]
-    fn traversal_matches_direct_has_attrs() {
-      let value = serde_json::json!({"a": 1, "b": 2});
-      let attrs = vec!["a".into(), "b".into()];
-      assert_eq!(
-        value_has_attrs_via_traversal(&value, &attrs),
-        value_has_attrs(&value, &attrs)
-      );
-    }
-
-    #[test]
-    fn object_keys_traversal_leaves_scalar_unchanged() {
-      let scalar = serde_json::json!(5);
-      let out = object_keys_traversal().over(scalar.clone(), |_| unreachable!());
-      assert_eq!(out, scalar);
-    }
-
-    #[test]
-    fn object_keys_traversal_rewrites_object_keys() {
-      let value = serde_json::json!({"a": 1});
-      let out = object_keys_traversal().over(value, |k| format!("{k}_x"));
-      assert_eq!(out, serde_json::json!({"a_x": 1}));
-    }
-
-    #[test]
-    fn value_has_attrs_via_traversal_empty_attrs_on_scalar() {
-      assert!(value_has_attrs_via_traversal(&serde_json::json!(null), &[]));
-    }
-  }
-}
-
-#[cfg(feature = "optics")]
-pub use traversal_impl::{object_keys_traversal, value_has_attrs_via_traversal};
 
 #[cfg(test)]
 mod tests {

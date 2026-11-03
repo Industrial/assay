@@ -1,0 +1,76 @@
+[
+  {
+    "name": "eq_fail",
+    "outcome": {
+      "kind": "fail",
+      "value": {
+        "claim": "eq",
+        "left": 1,
+        "right": {
+          "a": [
+            2
+          ]
+        },
+        "diff": "~ $: 1 -> {\"a\":[2]}"
+      }
+    }
+  },
+  {
+    "name": "eq_pass",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "eval_error",
+    "outcome": {
+      "kind": "eval_error",
+      "value": {
+        "kind": "type",
+        "message": "value is a set while a list was expected",
+        "span": null
+      }
+    }
+  },
+  {
+    "name": "io_error",
+    "outcome": {
+      "kind": "eval_error",
+      "value": {
+        "kind": "io",
+        "message": "nix: spawn failed",
+        "span": null
+      }
+    }
+  },
+  {
+    "name": "law",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "slow",
+    "outcome": {
+      "kind": "timeout"
+    }
+  },
+  {
+    "name": "throws_fail",
+    "outcome": {
+      "kind": "fail",
+      "value": {
+        "claim": "throws",
+        "left": 1,
+        "right": null,
+        "diff": "expression evaluated successfully; expected throw"
+      }
+    }
+  },
+  {
+    "name": "throws_pass",
+    "outcome": {
+      "kind": "pass"
+    }
+  }
+]

@@ -1,0 +1,10 @@
+{
+	"name": "slow",
+	"cases": {
+		"slow": {
+			"claim": "eq",
+			"expr": "builtins.foldl' (a: b: a + b) 0 (builtins.genList (x: x) 300000000)",
+			"expected": "1"
+		}
+	}
+}

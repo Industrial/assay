@@ -1,20 +1,17 @@
-//! Streaming reporter for assay outcomes.
+//! Report rendering for assay runs: pure functions from outcomes to the exact stdout text.
 //!
-//! ## Backpressure (v1)
-//!
-//! Outcomes are **buffered entirely** before any formatted output is emitted:
-//! `Stream::from_iterable` materializes the input slice, then combinators map/format
-//! the batch. Live per-case printing during suite execution is deferred to a later
-//! wave when the runner yields a true incremental `Stream` of case results.
+//! The run builds a typed [`SuiteReport`](crate::run::SuiteReport); the edge renders it with
+//! [`render_report`] and prints the text. Output is produced once the run is complete (cases run
+//! in parallel, the report is sorted by name).
 
 use std::fmt::Write as _;
 use std::io::{self, Write};
 
-use id_effect::{Effect, Stream, runtime::run_blocking};
 use serde::Serialize;
 
 use crate::outcome::AssayOutcome;
 use crate::run::RunSummary;
+use crate::verdict::InfraError;
 
 /// Output format for assay run reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -37,27 +34,20 @@ impl ReportFormat {
   }
 }
 
-/// One formatted output line (or block) produced by the stream reporter.
+/// One formatted output line (or block) of a report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportLine {
   pub body: String,
 }
 
 #[derive(Serialize)]
-struct JsonOutcome {
-  name: String,
-  outcome: AssayOutcome,
+struct JsonOutcome<'a> {
+  name: &'a str,
+  outcome: &'a AssayOutcome,
 }
 
-/// Build a finite stream over case outcomes (buffer-all v1).
-pub fn outcome_stream(
-  outcomes: &[(String, AssayOutcome)],
-) -> Stream<(String, AssayOutcome), (), ()> {
-  let owned: Vec<(String, AssayOutcome)> = outcomes.to_vec();
-  Stream::from_iterable(owned)
-}
-
-/// Map each outcome to a [`ReportLine`] for the chosen format.
+/// The line for one outcome (`index` is 1-based, used by TAP). JSON reports are one document
+/// ([`render_report`]); here a JSON line is the case's compact row.
 pub fn format_line(
   index: usize,
   name: &str,
@@ -67,7 +57,8 @@ pub fn format_line(
   let body = match format {
     ReportFormat::Human => format_human_line(name, outcome),
     ReportFormat::Tap => format_tap_line(index, name, outcome),
-    ReportFormat::Json => unreachable!("json uses batch encoding, not per-line format"),
+    ReportFormat::Json => serde_json::to_string(&JsonOutcome { name, outcome })
+      .unwrap_or_else(|e| format!("{{\"name\":{name:?},\"error\":{:?}}}", e.to_string())),
   };
   ReportLine { body }
 }
@@ -127,84 +118,7 @@ fn format_summary(summary: &RunSummary) -> String {
   )
 }
 
-fn write_json(outcomes: &[(String, AssayOutcome)], writer: &mut dyn Write) -> io::Result<()> {
-  let rows: Vec<JsonOutcome> = outcomes
-    .iter()
-    .map(|(name, outcome)| JsonOutcome {
-      name: name.clone(),
-      outcome: outcome.clone(),
-    })
-    .collect();
-  writeln!(
-    writer,
-    "{}",
-    serde_json::to_string_pretty(&rows).map_err(io::Error::other)?
-  )
-}
-
-/// Emit a full report for `outcomes` to `writer`.
-///
-/// v1 buffers all outcomes before writing (see module docs).
-pub fn report_outcomes(
-  outcomes: &[(String, AssayOutcome)],
-  format: ReportFormat,
-  summary: &RunSummary,
-  writer: &mut dyn Write,
-) -> io::Result<()> {
-  match format {
-    ReportFormat::Json => write_json(outcomes, writer),
-    ReportFormat::Human | ReportFormat::Tap => {
-      let indexed: Vec<(usize, String, AssayOutcome)> = outcomes
-        .iter()
-        .enumerate()
-        .map(|(idx, (name, outcome))| (idx + 1, name.clone(), outcome.clone()))
-        .collect();
-      let lines: Vec<ReportLine> = run_blocking(
-        Stream::from_iterable(indexed)
-          .map(move |(idx, name, outcome)| format_line(idx, &name, &outcome, format))
-          .run_collect(),
-        (),
-      )
-      .map_err(|e| io::Error::other(format!("stream collect failed: {e:?}")))?;
-
-      if format == ReportFormat::Tap {
-        writeln!(writer, "TAP version 13")?;
-        writeln!(writer, "1..{}", summary.total)?;
-      }
-
-      for line in lines {
-        writeln!(writer, "{}", line.body)?;
-      }
-
-      if format == ReportFormat::Human {
-        write!(writer, "{}", format_summary(summary))?;
-      }
-      Ok(())
-    }
-  }
-}
-
-/// Convenience: report to stdout.
-pub fn report_outcomes_stdout(
-  outcomes: &[(String, AssayOutcome)],
-  format: ReportFormat,
-  summary: &RunSummary,
-) -> io::Result<()> {
-  let mut stdout = io::stdout().lock();
-  report_outcomes(outcomes, format, summary, &mut stdout)
-}
-
-/// Effectful sink: print each [`ReportLine`] as it is produced (still buffer-all upstream).
-pub fn print_lines_effect(lines: Vec<ReportLine>) -> Effect<(), (), ()> {
-  Effect::new(move |_env: &mut ()| {
-    for line in lines {
-      println!("{}", line.body);
-    }
-    Ok(())
-  })
-}
-
-/// Map outcomes through a stream and collect formatted lines (test helper / future live path).
+/// The human / TAP lines of `outcomes` (none for JSON, which is one document).
 pub fn collect_formatted_lines(
   outcomes: &[(String, AssayOutcome)],
   format: ReportFormat,
@@ -212,24 +126,59 @@ pub fn collect_formatted_lines(
   if format == ReportFormat::Json {
     return Vec::new();
   }
-  run_blocking(
-    Stream::from_iterable(
-      outcomes
-        .iter()
-        .enumerate()
-        .map(|(idx, (name, outcome))| (idx + 1, name.clone(), outcome.clone()))
-        .collect::<Vec<_>>(),
-    )
-    .map(move |(idx, name, outcome)| format_line(idx, &name, &outcome, format))
-    .run_collect(),
-    (),
-  )
-  .expect("collect_formatted_lines")
+  outcomes
+    .iter()
+    .enumerate()
+    .map(|(idx, (name, outcome))| format_line(idx + 1, name, outcome, format))
+    .collect()
+}
+
+/// The whole report as printed: JSON is a pretty array plus newline; human is one line per
+/// case, then a blank line and the summary (no trailing newline); TAP is the plan, then one line
+/// per case.
+pub fn render_report(
+  outcomes: &[(String, AssayOutcome)],
+  format: ReportFormat,
+  summary: &RunSummary,
+) -> Result<String, InfraError> {
+  if format == ReportFormat::Json {
+    let rows: Vec<JsonOutcome<'_>> = outcomes
+      .iter()
+      .map(|(name, outcome)| JsonOutcome { name, outcome })
+      .collect();
+    let json = serde_json::to_string_pretty(&rows)
+      .map_err(|e| InfraError::Io(format!("render json report: {e}")))?;
+    return Ok(format!("{json}\n"));
+  }
+  let mut out = String::new();
+  if format == ReportFormat::Tap {
+    let _ = writeln!(out, "TAP version 13");
+    let _ = writeln!(out, "1..{}", summary.total);
+  }
+  for line in collect_formatted_lines(outcomes, format) {
+    let _ = writeln!(out, "{}", line.body);
+  }
+  if format == ReportFormat::Human {
+    out.push_str(&format_summary(summary));
+  }
+  Ok(out)
+}
+
+/// Writes [`render_report`] to `writer`.
+pub fn report_outcomes(
+  outcomes: &[(String, AssayOutcome)],
+  format: ReportFormat,
+  summary: &RunSummary,
+  writer: &mut dyn Write,
+) -> io::Result<()> {
+  let text = render_report(outcomes, format, summary).map_err(io::Error::other)?;
+  writer.write_all(text.as_bytes())
 }
 
 #[cfg(test)]
+// Tests parse the rendered JSON back to assert on it.
+#[cfg_attr(dylint_lib = "id_effect_lints", allow(schema_parsing_at_io_boundary))]
 mod tests {
-  use id_effect::succeed;
 
   use super::*;
 
@@ -330,15 +279,6 @@ mod tests {
   }
 
   #[test]
-  fn outcome_stream_collect_preserves_order() {
-    let outcomes = sample_outcomes();
-    let collected = run_blocking(outcome_stream(&outcomes).run_collect(), ()).expect("collect");
-    assert_eq!(collected.len(), 2);
-    assert_eq!(collected[0].0, "passing");
-    assert_eq!(collected[1].0, "failing");
-  }
-
-  #[test]
   fn collect_formatted_lines_human() {
     let outcomes = sample_outcomes();
     let lines = collect_formatted_lines(&outcomes, ReportFormat::Human);
@@ -383,17 +323,16 @@ mod tests {
   }
 
   #[test]
-  fn print_lines_effect_runs() {
-    let _ = run_blocking(
-      print_lines_effect(vec![ReportLine {
-        body: "line".into(),
-      }]),
-      (),
-    );
-  }
-
-  #[test]
-  fn succeed_effect_smoke() {
-    let _ = run_blocking(succeed::<(), (), ()>(()), ());
+  fn human_report_ends_with_the_summary_and_no_newline() {
+    let outcomes = sample_outcomes();
+    let summary = RunSummary {
+      total: 2,
+      passed: 1,
+      failed: 1,
+      errored: 0,
+    };
+    let text = render_report(&outcomes, ReportFormat::Human, &summary).unwrap();
+    assert!(text.starts_with("PASS passing\nFAIL failing"));
+    assert!(text.ends_with("\n\n1/2 passed, 1 failed, 0 errored"));
   }
 }

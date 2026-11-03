@@ -2,15 +2,22 @@
 
 use thiserror::Error;
 
-/// Infra failures (I/O, JSON parse) — map to Fail / non-zero exit.
+/// Failures of nixdrv commands (reading, parsing, arguments, output) — typed `Fail`, exit 1.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum InfraError {
-  #[error("io error at {path}: {message}")]
-  Io { path: String, message: String },
-  #[error("json parse error: {0}")]
-  Json(String),
+  /// Reading the input (file or stdin) failed.
+  #[error(transparent)]
+  Source(#[from] nixq::InfraError),
+  #[error(
+    "{input} is not a derivation: {message} (expected an ATerm `Derive(...)` or derivation JSON)"
+  )]
+  Json { input: String, message: String },
   #[error("parse error: {0}")]
   Parse(#[from] ParseError),
+  #[error("invalid {arg}: {message}")]
+  InvalidArg { arg: String, message: String },
+  #[error("cannot render output as JSON: {0}")]
+  Render(String),
 }
 
 /// Derivation / ATerm parse failures.
@@ -34,12 +41,26 @@ mod tests {
 
   #[test]
   fn display_roundtrip() {
-    let io = InfraError::Io {
+    let io = InfraError::from(nixq::InfraError::Io {
       path: "p".into(),
       message: "m".into(),
+    });
+    assert_eq!(io.to_string(), "io error at p: m");
+    let json = InfraError::Json {
+      input: "x.drv".into(),
+      message: "m".into(),
     };
-    assert!(io.to_string().contains("io error"));
-    assert!(InfraError::Json("x".into()).to_string().contains("json"));
+    assert!(json.to_string().starts_with("x.drv is not a derivation: m"));
+    let arg = InfraError::InvalidArg {
+      arg: "--digest-hex".into(),
+      message: "odd length".into(),
+    };
+    assert_eq!(arg.to_string(), "invalid --digest-hex: odd length");
+    assert!(
+      InfraError::Render("r".into())
+        .to_string()
+        .contains("render")
+    );
     let pe = ParseError::Unexpected {
       offset: 1,
       message: "bad".into(),

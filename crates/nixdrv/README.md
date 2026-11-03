@@ -2,7 +2,7 @@
 
 Derivation ATerm/JSON parse, field projection, and content-addressed store-path helpers on [id_effect](https://github.com/).
 
-**Doctrine:** pure derivation algebra (`parse`, `project`, `fixed_output_path`); I/O via DI 3.0 `DrvSource` + `effect!`/`~Key`; CLI = `run_with` + `id_effect_cli` exit codes.
+**Doctrine:** pure derivation algebra (`parse`, `project`, `fixed_output_path`); input bytes via the `DrvSourceService` capability (nixq's `JsonSource`: a file or stdin `-`) inside `effect!`; each command returns a typed report rendered at the edge; CLI = `id_effect_cli::run_main` (exit 0 ok, 1 typed failure, 2 usage, 101 defect, 130 Ctrl-C).
 
 ## Library
 

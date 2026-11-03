@@ -1,0 +1,11 @@
+{
+	"name": "malformed",
+	"cases": {
+		"ok": { "claim": "eq", "actual": 1, "expected": 1 },
+		"badKind": { "claim": "equals", "actual": 1, "expected": 1 },
+		"noExpected": { "claim": "eq", "expr": "1" },
+		"badAttrs": { "claim": "hasAttrs", "actual": {}, "attrs": ["a", 2] },
+		"badSeed": { "claim": "law", "name": "merge_identity", "seed": -1 },
+		"badProp": { "claim": "prop", "seed": "x", "trials": 99999999999 }
+	}
+}

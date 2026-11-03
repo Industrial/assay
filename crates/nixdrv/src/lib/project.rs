@@ -6,11 +6,16 @@ use crate::model::Derivation;
 
 /// Project selected fields from a derivation into a JSON object (omit missing keys).
 pub fn project(drv: &Derivation, fields: &[&str]) -> Value {
+  Value::Object(project_map(drv, fields))
+}
+
+/// [`project`] as the bare field map (key → JSON value).
+pub fn project_map(drv: &Derivation, fields: &[&str]) -> Map<String, Value> {
   let mut out = Map::new();
   for field in fields {
     insert_field(drv, &mut out, field);
   }
-  Value::Object(out)
+  out
 }
 
 fn insert_field(drv: &Derivation, out: &mut Map<String, Value>, field: &str) {

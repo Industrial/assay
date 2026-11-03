@@ -1,24 +1,33 @@
 //! nixq — JSON/attrpath query (pure value algebra + Effect I/O).
 
+// id_effect_lints: `effect!`'s `~` binds lower to `.await`, which `no_await_outside_from_async`
+// flags (a false positive); the pure value algebra returns `Result` by design and is lifted
+// into `Effect` where a capability is involved.
+#![cfg_attr(
+  dylint_lib = "id_effect_lints",
+  allow(no_await_outside_from_async, no_result_return_in_pub_fn)
+)]
+
 pub mod caps;
 pub mod commands;
 pub mod diff;
 pub mod error;
 pub mod force_path;
+pub mod live;
 pub mod normalize;
-pub mod optics;
 pub mod path;
+pub mod predicate;
 
-pub use caps::{JsonSourceKey, NixqEnv, live_providers};
+#[cfg(any(test, feature = "test-support"))]
+pub use caps::MockJsonSource;
+pub use caps::{FsJsonSource, JsonSource, JsonSourceService, NixqEnv, layer};
+pub use commands::{DiffReport, JsonReport, diff_report, load_json, lookup, parse_json};
 pub use diff::{structural_diff, values_equal};
 pub use error::{InfraError, PathError, PredicateResult};
 pub use force_path::force_paths;
 pub use normalize::normalize_value;
-pub use optics::{fold_object_keys, value_contains_subset, value_has_attrs};
 pub use path::{AttrPath, PathSegment, get_at_path, parse_attrpath};
-
-#[cfg(feature = "optics")]
-pub use optics::{object_keys_traversal, value_has_attrs_via_traversal};
+pub use predicate::{fold_object_keys, value_contains_subset, value_has_attrs};
 
 pub use id_effect::Exit;
 

@@ -141,13 +141,19 @@ fn shrink_once(value: &Value) -> Value {
   match value {
     Value::Array(items) if items.len() > 1 => Value::Array(items[..items.len() - 1].to_vec()),
     Value::Array(items) if !items.is_empty() => items[0].clone(),
-    Value::Object(map) if map.len() > 1 => {
-      let key = map.keys().next().expect("non-empty map").clone();
-      let mut shrunk = Map::new();
-      shrunk.insert(key.clone(), map[&key].clone());
-      Value::Object(shrunk)
+    // Keep the first entry (`map.len() > 1`, so there is one).
+    Value::Object(map) if map.len() > 1 => Value::Object(
+      map
+        .iter()
+        .take(1)
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect(),
+    ),
+    // Halve by characters, so a multi-byte string never splits inside a character.
+    Value::String(text) if !text.is_empty() => {
+      let half = text.chars().count() / 2;
+      Value::String(text.chars().take(half).collect())
     }
-    Value::String(text) if !text.is_empty() => Value::String(text[..text.len() / 2].into()),
     Value::Number(number) => {
       let n = number.as_u64().unwrap_or(0);
       Value::Number((n / 2).into())
@@ -253,6 +259,70 @@ mod tests {
     let mut z = Gen::new(0);
     let mut o = Gen::new(1);
     assert_eq!(z.gen_bool(), o.gen_bool());
+  }
+
+  #[test]
+  fn shrink_once_halves_multibyte_strings_by_character() {
+    assert_eq!(
+      shrink_once(&Value::String("ééé".into())),
+      Value::String("é".into())
+    );
+    assert_eq!(
+      shrink_value(&Value::String("ü€".into())),
+      Value::String(String::new())
+    );
+  }
+
+  /// JSON values (`serde_json`) from `id_effect`'s arbitrary `Unknown` trees, with non-ASCII
+  /// strings mixed in.
+  fn arb_json() -> impl proptest::strategy::Strategy<Value = Value> {
+    use id_effect::schema::serde_json_from_unknown;
+    use id_effect::testing::property::arb_unknown;
+    use proptest::prelude::*;
+    prop_oneof![
+      arb_unknown().prop_map(|u| serde_json_from_unknown(&u)),
+      "\\PC{0,8}".prop_map(Value::String),
+    ]
+  }
+
+  /// A size that every shrink step strictly decreases (or leaves the value fixed).
+  fn weight(value: &Value) -> u64 {
+    match value {
+      Value::Array(items) => 1 + items.iter().map(weight).sum::<u64>(),
+      Value::Object(map) => 1 + map.values().map(weight).sum::<u64>(),
+      Value::String(text) => 1 + text.chars().count() as u64,
+      Value::Number(n) => 1 + n.as_u64().unwrap_or(0),
+      _ => 1,
+    }
+  }
+
+  proptest::proptest! {
+    #[test]
+    fn shrinking_is_total_and_reaches_a_fixed_point(value in arb_json()) {
+      let shrunk = shrink_value(&value);
+      proptest::prop_assert_eq!(shrink_once(&shrunk), shrunk.clone());
+      proptest::prop_assert!(weight(&shrunk) <= weight(&value));
+    }
+
+    #[test]
+    fn a_failing_property_reports_its_seed_and_shrunk_counterexample(
+      seed in proptest::prelude::any::<u64>(),
+      value in arb_json(),
+    ) {
+      let outcome = prop_assert(seed, 1, |_| Err(value.clone()));
+      proptest::prop_assert_eq!(
+        outcome,
+        AssayOutcome::Counterexample { seed, shrunk: shrink_value(&value) }
+      );
+    }
+
+    #[test]
+    fn always_pass_passes_for_any_seed_and_trials(
+      seed in proptest::prelude::any::<u64>(),
+      trials in 0u32..256,
+    ) {
+      proptest::prop_assert_eq!(run_prop_by_name("always_pass", seed, trials), AssayOutcome::Pass);
+    }
   }
 
   #[test]

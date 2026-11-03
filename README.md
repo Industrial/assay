@@ -71,7 +71,15 @@ assay run my-suite.assay.nix
 devenv shell -- cargo test --workspace
 devenv shell -- moon run :format :check :test
 devenv shell -- moon run :assay   # DSL smoke + dogfood
+devenv shell -- moon run :lint-effect   # id_effect_lints via Dylint (also pre-push + CI)
 ```
+
+`:lint-effect` runs [`scripts/dylint.sh`](scripts/dylint.sh). Its first run installs the
+lints' pinned nightly (rustup, under `.devenv/state/rustup`) and `cargo-dylint` /
+`dylint-link` 6.2.0 (under `.devenv/state/dylint-tools`). Outside devenv it needs `rustup`;
+install the tools yourself with
+`cargo +nightly-2026-08-20 install --locked cargo-dylint@6.2.0 dylint-link@6.2.0`.
+The workspace needs Rust 1.94+ (MSRV); see [CHANGELOG.md](CHANGELOG.md) for releases.
 
 ## License
 

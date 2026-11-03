@@ -6,12 +6,16 @@
 
 use serde_json::Value;
 
-use crate::claims::{Claim, interpret_claim_with};
-use crate::eval::{EvalBackend, EvalResult};
+use std::sync::Arc;
+
+use crate::claims::{Claim, ClaimCaps, interpret_with};
+use crate::eval::NixEval;
+use crate::files::Fs;
 use crate::outcome::AssayOutcome;
+use crate::run::Trace;
 use crate::snapshot::SnapshotStore;
 use crate::verdict::{CaseVerdict, InfraError, outcome_to_exit};
-use id_effect::Exit;
+use id_effect::{Concurrency, Effect, Exit, all, fail, succeed};
 use nixq::{normalize_value, structural_diff, value_contains_subset};
 
 /// Marker embedded in generated Nix so mocks / debuggers can recognize batches.
@@ -73,8 +77,9 @@ pub fn partition_cases(cases: Vec<NamedClaim>) -> (Vec<NamedClaim>, Vec<NamedCla
   (batchable, isolated)
 }
 
-fn to_slot(name: String, claim: Claim) -> BatchSlot {
-  match claim {
+/// The batch slot of a [batchable](is_batchable) claim (`None` for any other).
+fn to_slot(name: String, claim: Claim) -> Option<BatchSlot> {
+  Some(match claim {
     Claim::Eq {
       left_expr,
       right_expr,
@@ -110,8 +115,8 @@ fn to_slot(name: String, claim: Claim) -> BatchSlot {
       primary_expr: expr,
       secondary_expr: None,
     },
-    other => unreachable!("non-batchable claim in to_slot: {other:?}"),
-  }
+    _ => return None,
+  })
 }
 
 fn wrap_nix(expr: &str) -> String {
@@ -133,7 +138,12 @@ fn wrap_nix_attr_names(expr: &str) -> String {
 
 /// Build a single Nix expression that evaluates every batchable claim.
 fn build_batch_expr(cases: &[(String, Claim)]) -> (String, Vec<BatchSlot>) {
-  let slots: Vec<BatchSlot> = cases.iter().cloned().map(|(n, c)| to_slot(n, c)).collect();
+  // Callers pass batchable claims only (`partition_cases`); others have no slot.
+  let slots: Vec<BatchSlot> = cases
+    .iter()
+    .cloned()
+    .filter_map(|(n, c)| to_slot(n, c))
+    .collect();
 
   let mut items = Vec::with_capacity(slots.len());
   for (idx, slot) in slots.iter().enumerate() {
@@ -147,7 +157,8 @@ fn build_batch_expr(cases: &[(String, Claim)]) -> (String, Vec<BatchSlot>) {
     let body = match &slot.kind {
       BatchKind::Eq => {
         let left = wrap_nix(&slot.primary_expr);
-        let right = wrap_nix(slot.secondary_expr.as_deref().unwrap());
+        // `to_slot` always sets the right side of an eq slot.
+        let right = wrap_nix(slot.secondary_expr.as_deref().unwrap_or("null"));
         format!(
           "{{ i = {idx}; name = {name_lit}; kind = \"{kind_lit}\"; left = {left}; right = {right}; }}"
         )
@@ -198,7 +209,33 @@ fn decode_try(node: &Value) -> Result<Option<Value>, AssayOutcome> {
   }
 }
 
-fn slot_outcome(slot: &BatchSlot, row: &Value, store: &SnapshotStore) -> AssayOutcome {
+/// The verdict of one slot from its `row`; a snapshot slot's value is judged against its golden
+/// (read through `fs`).
+fn slot_outcome(
+  slot: &BatchSlot,
+  row: &Value,
+  store: &SnapshotStore,
+  fs: &Arc<dyn Fs>,
+) -> Effect<AssayOutcome, InfraError> {
+  let kind = row.get("kind").and_then(Value::as_str).unwrap_or("");
+  match (&slot.kind, kind) {
+    (BatchKind::Snapshot { snap_name }, "snapshot") => {
+      match decode_try(row.get("primary").unwrap_or(&Value::Null)) {
+        Ok(Some(actual)) => store.assert_match(fs, snap_name, actual, store.update_snapshots),
+        Ok(None) => succeed(AssayOutcome::EvalError {
+          kind: "throw".into(),
+          message: "snapshot expr failed to evaluate".into(),
+          span: None,
+        }),
+        Err(e) => succeed(e),
+      }
+    }
+    _ => succeed(value_slot_outcome(slot, row)),
+  }
+}
+
+/// The verdict of a slot judged from its `row` alone (every kind but a snapshot's value).
+fn value_slot_outcome(slot: &BatchSlot, row: &Value) -> AssayOutcome {
   let kind = row.get("kind").and_then(Value::as_str).unwrap_or("");
   match (&slot.kind, kind) {
     (BatchKind::Eq, "eq") => {
@@ -300,17 +337,6 @@ fn slot_outcome(slot: &BatchSlot, row: &Value, store: &SnapshotStore) -> AssayOu
         },
       }
     }
-    (BatchKind::Snapshot { snap_name }, "snapshot") => {
-      match decode_try(row.get("primary").unwrap_or(&Value::Null)) {
-        Ok(Some(actual)) => store.assert_match(snap_name, &actual, store.update_snapshots),
-        Ok(None) => AssayOutcome::EvalError {
-          kind: "throw".into(),
-          message: "snapshot expr failed to evaluate".into(),
-          span: None,
-        },
-        Err(e) => e,
-      }
-    }
     _ => AssayOutcome::EvalError {
       kind: "batch".into(),
       message: format!(
@@ -322,165 +348,151 @@ fn slot_outcome(slot: &BatchSlot, row: &Value, store: &SnapshotStore) -> AssayOu
   }
 }
 
-#[cfg(test)]
-thread_local! {
-    pub(crate) static FORCE_BATCH_JSON_EVAL: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
-    /// When set, `eval_batch_expr` uses this instead of `nix_eval_file` (file path only).
-    pub(crate) static BATCH_NIX_FILE_EVAL: std::cell::Cell<Option<AssayOutcome>> =
-        const { std::cell::Cell::new(None) };
+/// Evaluates the mega-batch `expr`: from a file first (mega-batches easily exceed exec
+/// `ARG_MAX` via `--expr`), then as `--expr`; fails with both errors.
+fn eval_batch_expr(eval: &Arc<dyn NixEval>, expr: &str) -> Effect<Value, InfraError> {
+  let (retry, expr_again) = (Arc::clone(eval), expr.to_owned());
+  eval.eval_source(expr).catch(move |first| {
+    retry
+      .eval_expr(&expr_again)
+      .catch(move |second| fail(batch_failure(&first, &second)))
+  })
 }
 
-fn eval_batch_expr(eval: &dyn EvalBackend, expr: &str) -> Result<Value, InfraError> {
-  #[cfg(test)]
-  if FORCE_BATCH_JSON_EVAL.get() {
-    return match eval.eval_json(expr) {
-      EvalResult::Ok(v) => Ok(v),
-      EvalResult::Err(AssayOutcome::EvalError { message, .. }) => {
-        Err(InfraError::Worker(format!("batch eval failed: {message}")))
-      }
-      EvalResult::Err(other) => Err(InfraError::Worker(format!("batch eval failed: {other:?}"))),
-    };
-  }
-
-  // Prefer a temp file: mega-batches easily exceed exec ARG_MAX via `--expr`.
-  let dir = std::env::temp_dir().join(format!(
-    "assay-batch-{}-{}",
-    std::process::id(),
-    std::time::SystemTime::now()
-      .duration_since(std::time::UNIX_EPOCH)
-      .map(|d| d.as_nanos())
-      .unwrap_or(0)
-  ));
-  std::fs::create_dir_all(&dir).map_err(|e| InfraError::Io(e.to_string()))?;
-  let path = dir.join("batch.nix");
-  std::fs::write(&path, expr).map_err(|e| InfraError::Io(e.to_string()))?;
-  let result = {
-    #[cfg(test)]
-    {
-      if let Some(forced) = BATCH_NIX_FILE_EVAL.take() {
-        Err(forced)
-      } else {
-        crate::eval::nix_eval_file(&path)
-      }
+fn batch_failure(first: &AssayOutcome, second: &AssayOutcome) -> InfraError {
+  InfraError::Worker(match (first, second) {
+    (AssayOutcome::EvalError { message, .. }, AssayOutcome::EvalError { message: m2, .. }) => {
+      format!("batch eval failed: {message}; fallback: {m2}")
     }
-    #[cfg(not(test))]
-    {
-      crate::eval::nix_eval_file(&path)
+    (AssayOutcome::EvalError { message, .. }, other) => {
+      format!("batch eval failed: {message}; fallback: {other:?}")
     }
-  };
-  let _ = std::fs::remove_dir_all(&dir);
-  match result {
-    Ok(v) => Ok(v),
-    Err(AssayOutcome::EvalError { message, .. }) => match eval.eval_json(expr) {
-      EvalResult::Ok(v) => Ok(v),
-      EvalResult::Err(AssayOutcome::EvalError { message: m2, .. }) => Err(InfraError::Worker(
-        format!("batch eval failed: {message}; fallback: {m2}"),
-      )),
-      EvalResult::Err(other) => Err(InfraError::Worker(format!(
-        "batch eval failed: {message}; fallback: {other:?}"
-      ))),
-    },
-    Err(other) => match eval.eval_json(expr) {
-      EvalResult::Ok(v) => Ok(v),
-      EvalResult::Err(_) => Err(InfraError::Worker(format!("batch eval failed: {other:?}"))),
-    },
-  }
+    (other, _) => format!("batch eval failed: {other:?}"),
+  })
 }
 
+/// One isolated interpretation per claim (the `--no-batch` path), in input order.
 fn run_batch_fallback(
-  cases: &[NamedClaim],
-  eval: &dyn EvalBackend,
-  store: &SnapshotStore,
-  batch_err: InfraError,
-) -> Result<Vec<NamedExit>, InfraError> {
-  let _ = batch_err; // reserved for future tracing
-  let mut out = Vec::with_capacity(cases.len());
-  for (name, claim) in cases {
+  cases: Vec<NamedClaim>,
+  caps: ClaimCaps,
+) -> Effect<Vec<NamedExit>, InfraError> {
+  let runs = cases.into_iter().map(move |(name, claim)| {
     // Prefer the isolated interpreter (same path as `--no-batch`) so IFC /
     // store-path edge cases that break mega-batch still pass per claim.
-    match interpret_claim_with(eval, store, claim) {
-      Ok(verdict) => out.push((name.clone(), Exit::Success(verdict))),
-      Err(e) => out.push((name.clone(), Exit::Failure(id_effect::Cause::Fail(e)))),
-    }
-  }
-  Ok(out)
+    interpret_with(&caps, claim)
+      .exit::<InfraError>()
+      .map(move |exit| (name, exit))
+  });
+  all(runs.collect::<Vec<_>>(), Concurrency::Sequential)
 }
 
-/// Evaluate all batchable claims in one nix process; return verdicts.
+/// Evaluate all batchable claims in one nix process; return verdicts in input order. When the
+/// batch itself fails (primop type errors escape `tryEval` on Nix 2.31+), every claim runs
+/// isolated instead. `trace` receives progress notes (`ASSAY_TRACE`).
 pub fn run_batch(
-  cases: &[NamedClaim],
-  eval: &dyn EvalBackend,
-  store: &SnapshotStore,
-) -> Result<Vec<NamedExit>, InfraError> {
+  cases: Vec<NamedClaim>,
+  caps: ClaimCaps,
+  trace: Trace,
+) -> Effect<Vec<NamedExit>, InfraError> {
   if cases.is_empty() {
-    return Ok(Vec::new());
+    return succeed(Vec::new());
   }
-  let t_build = std::time::Instant::now();
-  let (expr, slots) = build_batch_expr(cases);
-  if std::env::var_os("ASSAY_TRACE").is_some() {
-    eprintln!(
-      "assay_trace: build_batch {:.1}ms ({} slots, {} bytes)",
-      t_build.elapsed().as_secs_f64() * 1000.0,
-      slots.len(),
-      expr.len()
-    );
-  }
-  let t_eval = std::time::Instant::now();
-  let value = match eval_batch_expr(eval, &expr) {
-    Ok(v) => {
-      if std::env::var_os("ASSAY_TRACE").is_some() {
-        eprintln!(
-          "assay_trace: eval_batch {:.1}ms",
-          t_eval.elapsed().as_secs_f64() * 1000.0
-        );
+  let (expr, slots) = build_batch_expr(&cases);
+  trace.note(format!(
+    "build_batch ({} slots, {} bytes)",
+    slots.len(),
+    expr.len()
+  ));
+  let (store, fs) = (caps.snapshots.clone(), Arc::clone(&caps.fs));
+  let on_fail = trace.clone();
+  eval_batch_expr(&caps.eval, &expr)
+    .map(Ok)
+    .catch(move |batch_err| succeed(Err(batch_err)))
+    .flat_map(move |evaluated| match evaluated {
+      Ok(value) => {
+        trace.note("eval_batch".into());
+        batch_results(&value, &slots, &store, &fs)
       }
-      v
-    }
-    Err(batch_err) => {
-      if std::env::var_os("ASSAY_TRACE").is_some() {
-        eprintln!(
-          "assay_trace: eval_batch FAIL {:.1}ms → fallback",
-          t_eval.elapsed().as_secs_f64() * 1000.0
-        );
+      Err(_batch_err) => {
+        on_fail.note("eval_batch FAIL -> fallback".into());
+        run_batch_fallback(cases, caps)
       }
-      // Primop type errors escape tryEval on Nix 2.31+ and abort the mega-batch.
-      // Fall back to one-process-per-claim so the suite still completes.
-      return run_batch_fallback(cases, eval, store, batch_err);
-    }
+    })
+}
+
+/// The verdict of every slot from the batch's `results` array, in slot order.
+fn batch_results(
+  value: &Value,
+  slots: &[BatchSlot],
+  store: &SnapshotStore,
+  fs: &Arc<dyn Fs>,
+) -> Effect<Vec<NamedExit>, InfraError> {
+  let Some(results) = value.get("results").and_then(Value::as_array) else {
+    return fail(InfraError::Worker(format!(
+      "batch eval missing results array (marker {BATCH_MARKER})"
+    )));
   };
 
-  let results = value
-    .get("results")
-    .and_then(Value::as_array)
-    .ok_or_else(|| {
-      InfraError::Worker(format!(
-        "batch eval missing results array (marker {BATCH_MARKER})"
-      ))
-    })?;
-
   if results.len() != slots.len() {
-    return Err(InfraError::Worker(format!(
+    return fail(InfraError::Worker(format!(
       "batch result count {} != slot count {}",
       results.len(),
       slots.len()
     )));
   }
 
-  let mut out = Vec::with_capacity(slots.len());
-  for (slot, row) in slots.iter().zip(results.iter()) {
-    let outcome = slot_outcome(slot, row, store);
-    out.push((slot.name.clone(), outcome_to_exit(outcome)));
-  }
-  Ok(out)
+  let judged = slots.iter().zip(results.iter()).map(|(slot, row)| {
+    let name = slot.name.clone();
+    slot_outcome(slot, row, store, fs).map(move |outcome| (name, outcome_to_exit(outcome)))
+  });
+  all(judged.collect::<Vec<_>>(), Concurrency::Sequential)
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::eval::ProcessNixEval;
+  use crate::eval::EvalResult;
+  use crate::fake::MemFs;
+  use crate::live::LiveNixEval;
   use crate::snapshot::SnapshotStore;
+  use id_effect::{expect_exit_success, run_test};
   use std::path::PathBuf;
+
+  /// [`slot_outcome`] over an empty in-memory filesystem, run to completion.
+  fn judge(slot: &BatchSlot, row: &Value, store: &SnapshotStore) -> AssayOutcome {
+    let fs: Arc<dyn Fs> = Arc::new(MemFs::default());
+    expect_exit_success(run_test(slot_outcome(slot, row, store, &fs)))
+  }
+
+  /// [`ClaimCaps`] over `eval` and `store` (in-memory filesystem and path-info store).
+  fn batch_caps(eval: impl NixEval + 'static, store: &SnapshotStore) -> ClaimCaps {
+    ClaimCaps {
+      eval: Arc::new(eval),
+      snapshots: store.clone(),
+      path_info: Arc::new(nixstore::MockPathInfoStore::default()),
+      fs: Arc::new(MemFs::default()),
+    }
+  }
+
+  /// [`run_batch`] over `eval` and `store`, run to completion.
+  fn run_batch_with(
+    cases: &[NamedClaim],
+    eval: impl NixEval + 'static,
+    store: &SnapshotStore,
+  ) -> Result<Vec<NamedExit>, InfraError> {
+    batch_result(run_test(run_batch(
+      cases.to_vec(),
+      batch_caps(eval, store),
+      Trace::default(),
+    )))
+  }
+
+  fn batch_result(exit: Exit<Vec<NamedExit>, InfraError>) -> Result<Vec<NamedExit>, InfraError> {
+    exit.into_result().map_err(|c| match c {
+      id_effect::Cause::Fail(e) => e,
+      other => InfraError::Worker(format!("{other:?}")),
+    })
+  }
 
   #[test]
   fn partition_splits_pattern_throws() {
@@ -532,7 +544,7 @@ mod tests {
     assert_eq!(slots[0].name, "add");
   }
 
-  use crate::caps::MockNixEval;
+  use crate::fake::{MockNixEval, SyncEval};
   use serde_json::json;
 
   struct MockBatchJsonEval {
@@ -540,7 +552,7 @@ mod tests {
     results: Value,
   }
 
-  impl EvalBackend for MockBatchJsonEval {
+  impl SyncEval for MockBatchJsonEval {
     fn eval_json(&self, expr: &str) -> EvalResult {
       if expr.contains(BATCH_MARKER) {
         return EvalResult::Ok(self.results.clone());
@@ -561,7 +573,7 @@ mod tests {
   #[test]
   fn run_batch_empty_returns_empty() {
     let store = SnapshotStore::new(PathBuf::from("/tmp/assay-batch-empty"));
-    let outs = run_batch(&[], &MockNixEval::default(), &store).expect("empty");
+    let outs = run_batch_with(&[], MockNixEval::default(), &store).expect("empty");
     assert!(outs.is_empty());
   }
 
@@ -585,20 +597,20 @@ mod tests {
         "right": {"ok": true, "value": 2}
     });
     assert!(matches!(
-      slot_outcome(&slot, &fail_row, &store),
+      judge(&slot, &fail_row, &store),
       AssayOutcome::Fail { .. }
     ));
 
     let left_throw =
       json!({"kind": "eq", "left": {"ok": false}, "right": {"ok": true, "value": 1}});
     assert!(matches!(
-      slot_outcome(&slot, &left_throw, &store),
+      judge(&slot, &left_throw, &store),
       AssayOutcome::EvalError { .. }
     ));
 
     let mismatch = json!({"kind": "subset", "primary": {"ok": true, "value": {}}});
     assert!(matches!(
-      slot_outcome(&slot, &mismatch, &store),
+      judge(&slot, &mismatch, &store),
       AssayOutcome::EvalError { .. }
     ));
   }
@@ -613,14 +625,11 @@ mod tests {
       },
     );
     let subset_ok = json!({"kind": "subset", "primary": {"ok": true, "value": {"a": 1, "b": 2}}});
-    assert_eq!(
-      slot_outcome(&subset, &subset_ok, &store),
-      AssayOutcome::Pass
-    );
+    assert_eq!(judge(&subset, &subset_ok, &store), AssayOutcome::Pass);
 
     let subset_fail = json!({"kind": "subset", "primary": {"ok": true, "value": {"a": 9}}});
     assert!(matches!(
-      slot_outcome(&subset, &subset_fail, &store),
+      judge(&subset, &subset_fail, &store),
       AssayOutcome::Fail { .. }
     ));
 
@@ -631,10 +640,10 @@ mod tests {
       },
     );
     let has_ok = json!({"kind": "hasAttrs", "primary": {"ok": true, "keys": ["a"]}});
-    assert_eq!(slot_outcome(&has, &has_ok, &store), AssayOutcome::Pass);
+    assert_eq!(judge(&has, &has_ok, &store), AssayOutcome::Pass);
     let has_missing = json!({"kind": "hasAttrs", "primary": {"ok": true, "keys": []}});
     assert!(matches!(
-      slot_outcome(&has, &has_missing, &store),
+      judge(&has, &has_missing, &store),
       AssayOutcome::Fail { .. }
     ));
 
@@ -646,7 +655,7 @@ mod tests {
     );
     let snap_row = json!({"kind": "snapshot", "primary": {"ok": true, "value": {"x": 1}}});
     assert!(matches!(
-      slot_outcome(&snap, &snap_row, &store),
+      judge(&snap, &snap_row, &store),
       AssayOutcome::SnapshotMismatch { .. }
     ));
   }
@@ -721,7 +730,7 @@ mod tests {
       results,
     };
     let store = SnapshotStore::new(PathBuf::from("/tmp/assay-batch-mock"));
-    let outs = run_batch(&cases, &eval, &store).expect("batch");
+    let outs = run_batch_with(&cases, eval, &store).expect("batch");
     assert_eq!(outs.len(), 2);
     assert!(matches!(outs[0].1, Exit::Success(CaseVerdict::Pass)));
     assert!(matches!(
@@ -732,7 +741,7 @@ mod tests {
 
   struct FailingBatchEval(MockNixEval);
 
-  impl EvalBackend for FailingBatchEval {
+  impl SyncEval for FailingBatchEval {
     fn eval_json(&self, expr: &str) -> EvalResult {
       if expr.contains(BATCH_MARKER) {
         return EvalResult::Err(AssayOutcome::EvalError {
@@ -757,7 +766,7 @@ mod tests {
       },
     )];
     let store = SnapshotStore::new(PathBuf::from("/tmp/assay-batch-fallback"));
-    let outs = run_batch(&cases, &FailingBatchEval(mock), &store).expect("fallback");
+    let outs = run_batch_with(&cases, FailingBatchEval(mock), &store).expect("fallback");
     assert!(matches!(outs[0].1, Exit::Success(CaseVerdict::Pass)));
   }
 
@@ -783,9 +792,21 @@ mod tests {
     }));
   }
 
+  fn has_nix() -> bool {
+    std::process::Command::new("nix")
+      .arg("--version")
+      .output()
+      .is_ok_and(|o| o.status.success())
+  }
+
+  /// The batch over the live evaluator (skipped without `nix`). Runs on the default runtime
+  /// (`block_on`): `tokio::process` needs it, the `TestExecutor` has none.
   #[test]
-  #[ignore = "requires nix in PATH"]
   fn live_batch_eq_and_bare_throws() {
+    if !has_nix() {
+      eprintln!("skipping live_batch_eq_and_bare_throws: nix not on PATH");
+      return;
+    }
     let cases = vec![
       (
         "ok".into(),
@@ -810,7 +831,8 @@ mod tests {
       ),
     ];
     let store = SnapshotStore::new(PathBuf::from("/tmp/assay-batch-test-goldens"));
-    let outs = run_batch(&cases, &ProcessNixEval, &store).expect("batch");
+    let run = run_batch(cases, batch_caps(LiveNixEval, &store), Trace::default());
+    let outs = batch_result(run.block_on()).expect("batch");
     assert_eq!(outs.len(), 3);
     assert!(matches!(outs[0].1, Exit::Success(CaseVerdict::Pass)));
     assert!(matches!(outs[1].1, Exit::Success(CaseVerdict::Pass)));
@@ -818,103 +840,6 @@ mod tests {
       outs[2].1,
       Exit::Success(CaseVerdict::AssertFail { .. })
     ));
-  }
-
-  #[test]
-  fn eval_batch_expr_force_json_missing_results() {
-    FORCE_BATCH_JSON_EVAL.with(|f| {
-      f.set(true);
-      let eval = MockBatchJsonEval {
-        inner: MockNixEval::default(),
-        results: json!({ BATCH_MARKER: true }),
-      };
-      let cases = vec![(
-        "eq".into(),
-        Claim::Eq {
-          left_expr: "1".into(),
-          right_expr: "1".into(),
-        },
-      )];
-      let store = SnapshotStore::new(PathBuf::from("/tmp/assay-batch-missing-results"));
-      let err = run_batch(&cases, &eval, &store).unwrap_err();
-      assert!(matches!(err, InfraError::Worker(_)));
-      f.set(false);
-    });
-  }
-
-  #[test]
-  fn eval_batch_expr_force_json_count_mismatch() {
-    FORCE_BATCH_JSON_EVAL.with(|f| {
-            f.set(true);
-            let results = json!({
-                BATCH_MARKER: true,
-                "results": [{"kind": "eq", "left": {"ok": true, "value": 1}, "right": {"ok": true, "value": 1}}]
-            });
-            let eval = MockBatchJsonEval {
-                inner: MockNixEval::default(),
-                results,
-            };
-            let cases = vec![
-                ("a".into(), Claim::Eq { left_expr: "1".into(), right_expr: "1".into() }),
-                ("b".into(), Claim::Eq { left_expr: "2".into(), right_expr: "2".into() }),
-            ];
-            let store = SnapshotStore::new(PathBuf::from("/tmp/assay-batch-count"));
-            let err = run_batch(&cases, &eval, &store).unwrap_err();
-            assert!(matches!(err, InfraError::Worker(_)));
-            f.set(false);
-        });
-  }
-
-  #[test]
-  fn eval_batch_expr_force_json_eval_error() {
-    FORCE_BATCH_JSON_EVAL.with(|f| {
-      f.set(true);
-      struct ErrEval;
-      impl EvalBackend for ErrEval {
-        fn eval_json(&self, _expr: &str) -> EvalResult {
-          EvalResult::Err(AssayOutcome::EvalError {
-            kind: "batch".into(),
-            message: "boom".into(),
-            span: None,
-          })
-        }
-      }
-      let cases = vec![(
-        "eq".into(),
-        Claim::Eq {
-          left_expr: "1".into(),
-          right_expr: "1".into(),
-        },
-      )];
-      let store = SnapshotStore::new(PathBuf::from("/tmp/assay-batch-err"));
-      let outs = run_batch(&cases, &ErrEval, &store).expect("fallback");
-      assert_eq!(outs.len(), 1);
-      f.set(false);
-    });
-  }
-
-  #[test]
-  fn eval_batch_expr_force_json_non_eval_error() {
-    FORCE_BATCH_JSON_EVAL.with(|f| {
-      f.set(true);
-      struct RecEval;
-      impl EvalBackend for RecEval {
-        fn eval_json(&self, _expr: &str) -> EvalResult {
-          EvalResult::Err(AssayOutcome::Recursion)
-        }
-      }
-      let cases = vec![(
-        "eq".into(),
-        Claim::Eq {
-          left_expr: "1".into(),
-          right_expr: "1".into(),
-        },
-      )];
-      let store = SnapshotStore::new(PathBuf::from("/tmp/assay-batch-rec"));
-      let outs = run_batch(&cases, &RecEval, &store).expect("fallback");
-      assert_eq!(outs.len(), 1);
-      f.set(false);
-    });
   }
 
   #[test]
@@ -927,7 +852,7 @@ mod tests {
         "right": {"ok": false}
     });
     assert!(matches!(
-      slot_outcome(&eq, &right_throw, &store),
+      judge(&eq, &right_throw, &store),
       AssayOutcome::EvalError { .. }
     ));
 
@@ -939,13 +864,13 @@ mod tests {
     );
     let bad_decode = json!({"kind": "subset", "primary": "nope"});
     assert!(matches!(
-      slot_outcome(&subset, &bad_decode, &store),
+      judge(&subset, &bad_decode, &store),
       AssayOutcome::EvalError { .. }
     ));
 
     let subset_throw = json!({"kind": "subset", "primary": {"ok": false}});
     assert!(matches!(
-      slot_outcome(&subset, &subset_throw, &store),
+      judge(&subset, &subset_throw, &store),
       AssayOutcome::EvalError { .. }
     ));
 
@@ -957,12 +882,12 @@ mod tests {
     );
     let has_false = json!({"kind": "hasAttrs", "primary": {"ok": false}});
     assert!(matches!(
-      slot_outcome(&has, &has_false, &store),
+      judge(&has, &has_false, &store),
       AssayOutcome::EvalError { .. }
     ));
     let has_none = json!({"kind": "hasAttrs", "primary": {"oops": true}});
     assert!(matches!(
-      slot_outcome(&has, &has_none, &store),
+      judge(&has, &has_none, &store),
       AssayOutcome::EvalError { .. }
     ));
 
@@ -974,217 +899,144 @@ mod tests {
     );
     let snap_throw = json!({"kind": "snapshot", "primary": {"ok": false}});
     assert!(matches!(
-      slot_outcome(&snap, &snap_throw, &store),
+      judge(&snap, &snap_throw, &store),
       AssayOutcome::EvalError { .. }
     ));
   }
 
-  #[test]
-  fn run_batch_trace_env_does_not_panic() {
-    unsafe {
-      std::env::set_var("ASSAY_TRACE", "1");
+  /// Answers batch sources with `source`, batch `--expr`s with `expr`, others via `inner`.
+  struct ScriptedBatch {
+    inner: MockNixEval,
+    source: EvalResult,
+    expr: EvalResult,
+  }
+
+  impl SyncEval for ScriptedBatch {
+    fn eval_json(&self, expr: &str) -> EvalResult {
+      if expr.contains(BATCH_MARKER) {
+        return self.expr.clone();
+      }
+      self.inner.eval_json(expr)
     }
-    let cases = vec![(
-      "eq".into(),
-      Claim::Eq {
-        left_expr: "1".into(),
-        right_expr: "1".into(),
-      },
-    )];
-    let results = json!({
-        BATCH_MARKER: true,
-        "results": [{"kind": "eq", "left": {"ok": true, "value": 1}, "right": {"ok": true, "value": 1}}]
-    });
-    let eval = MockBatchJsonEval {
-      inner: MockNixEval::default(),
-      results,
-    };
-    let store = SnapshotStore::new(PathBuf::from("/tmp/assay-batch-trace"));
-    FORCE_BATCH_JSON_EVAL.with(|f| {
-      f.set(true);
-      let _ = run_batch(&cases, &eval, &store);
-      f.set(false);
-    });
-    unsafe {
-      std::env::remove_var("ASSAY_TRACE");
+    fn eval_source_json(&self, source: &str) -> EvalResult {
+      if source.contains(BATCH_MARKER) {
+        return self.source.clone();
+      }
+      self.inner.eval_json(source)
     }
   }
 
-  #[test]
-  fn nix_file_eval_fallback_to_json_ok() {
-    BATCH_NIX_FILE_EVAL.with(|c| {
-      c.set(Some(AssayOutcome::EvalError {
-        kind: "throw".into(),
-        message: "file fail".into(),
-        span: None,
-      }));
-    });
-    let cases = vec![(
+  fn eval_err(kind: &str, message: &str) -> EvalResult {
+    EvalResult::Err(AssayOutcome::EvalError {
+      kind: kind.into(),
+      message: message.into(),
+      span: None,
+    })
+  }
+
+  fn one_eq() -> Vec<NamedClaim> {
+    vec![(
       "eq".into(),
       Claim::Eq {
         left_expr: "1".into(),
         right_expr: "1".into(),
       },
-    )];
-    let results = json!({
-        BATCH_MARKER: true,
-        "results": [{"kind": "eq", "left": {"ok": true, "value": 1}, "right": {"ok": true, "value": 1}}]
-    });
-    let eval = MockBatchJsonEval {
+    )]
+  }
+
+  fn one_row() -> Value {
+    json!({ BATCH_MARKER: true, "results": [
+      {"kind": "eq", "left": {"ok": true, "value": 1}, "right": {"ok": true, "value": 1}}
+    ]})
+  }
+
+  #[test]
+  fn malformed_batch_results_fail_the_batch() {
+    let store = SnapshotStore::new(PathBuf::from("/tmp/assay-batch-missing-results"));
+    let missing = ScriptedBatch {
       inner: MockNixEval::default(),
-      results,
+      source: EvalResult::Ok(json!({ BATCH_MARKER: true })),
+      expr: eval_err("throw", "unused"),
     };
+    let err = run_batch_with(&one_eq(), missing, &store).unwrap_err();
+    assert!(matches!(err, InfraError::Worker(m) if m.contains("missing results")));
+    let mismatch = ScriptedBatch {
+      inner: MockNixEval::default(),
+      source: EvalResult::Ok(json!({ BATCH_MARKER: true, "results": [] })),
+      expr: eval_err("throw", "unused"),
+    };
+    let err = run_batch_with(&one_eq(), mismatch, &store).unwrap_err();
+    assert!(matches!(err, InfraError::Worker(m) if m.contains("result count")));
+  }
+
+  #[test]
+  fn failed_batch_file_eval_retries_as_expr() {
     let store = SnapshotStore::new(PathBuf::from("/tmp/assay-file-fallback-ok"));
-    let outs = run_batch(&cases, &eval, &store).expect("batch");
-    assert_eq!(outs.len(), 1);
+    let eval = ScriptedBatch {
+      inner: MockNixEval::default(),
+      source: eval_err("throw", "file eval failed"),
+      expr: EvalResult::Ok(one_row()),
+    };
+    let outs = run_batch_with(&one_eq(), eval, &store).expect("batch");
     assert!(matches!(outs[0].1, Exit::Success(CaseVerdict::Pass)));
   }
 
   #[test]
-  fn nix_file_eval_dual_eval_error_triggers_fallback() {
-    BATCH_NIX_FILE_EVAL.with(|c| {
-      c.set(Some(AssayOutcome::EvalError {
-        kind: "throw".into(),
-        message: "file fail".into(),
-        span: None,
-      }));
-    });
-    struct DualFail;
-    impl EvalBackend for DualFail {
-      fn eval_json(&self, expr: &str) -> EvalResult {
-        if expr.contains(BATCH_MARKER) {
-          EvalResult::Err(AssayOutcome::EvalError {
-            kind: "throw".into(),
-            message: "batch fail".into(),
-            span: None,
-          })
-        } else {
-          EvalResult::Ok(json!(1))
-        }
-      }
-    }
-    let cases = vec![(
-      "eq".into(),
-      Claim::Eq {
-        left_expr: "1".into(),
-        right_expr: "1".into(),
-      },
-    )];
+  fn failed_batch_runs_every_claim_isolated() {
     let store = SnapshotStore::new(PathBuf::from("/tmp/assay-dual-fail"));
-    let outs = run_batch(&cases, &DualFail, &store).expect("fallback");
-    assert_eq!(outs.len(), 1);
+    for (source, expr) in [
+      (eval_err("throw", "a"), eval_err("throw", "b")),
+      (
+        EvalResult::Err(AssayOutcome::Recursion),
+        eval_err("io", "b"),
+      ),
+    ] {
+      let eval = ScriptedBatch {
+        inner: MockNixEval::default(),
+        source,
+        expr,
+      };
+      // The isolated eq `[(1) (1)]` evaluates to `[null null]` on the mock: equal, so a pass.
+      let outs = run_batch_with(&one_eq(), eval, &store).expect("fallback");
+      assert!(matches!(outs[0].1, Exit::Success(CaseVerdict::Pass)));
+    }
   }
 
   #[test]
-  fn nix_file_eval_recursion_fallback_ok() {
-    BATCH_NIX_FILE_EVAL.with(|c| c.set(Some(AssayOutcome::Recursion)));
-    let cases = vec![(
-      "eq".into(),
-      Claim::Eq {
-        left_expr: "1".into(),
-        right_expr: "1".into(),
-      },
-    )];
-    let results = json!({
-        BATCH_MARKER: true,
-        "results": [{"kind": "eq", "left": {"ok": true, "value": 1}, "right": {"ok": true, "value": 1}}]
-    });
-    let eval = MockBatchJsonEval {
+  fn batch_failure_messages_name_both_errors() {
+    let throw = |m: &str| AssayOutcome::EvalError {
+      kind: "throw".into(),
+      message: m.into(),
+      span: None,
+    };
+    let both = batch_failure(&throw("a"), &throw("b"));
+    assert_eq!(
+      both,
+      InfraError::Worker("batch eval failed: a; fallback: b".into())
+    );
+    let rec = batch_failure(&AssayOutcome::Recursion, &throw("b"));
+    assert!(matches!(rec, InfraError::Worker(m) if m.contains("Recursion")));
+  }
+
+  #[test]
+  fn batch_trace_notes_build_and_eval() {
+    let notes = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = Arc::clone(&notes);
+    let trace = Trace::to(move |n| sink.lock().unwrap().push(n.to_string()));
+    let eval = ScriptedBatch {
       inner: MockNixEval::default(),
-      results,
+      source: EvalResult::Ok(one_row()),
+      expr: eval_err("throw", "unused"),
     };
-    let store = SnapshotStore::new(PathBuf::from("/tmp/assay-rec-fallback"));
-    let outs = run_batch(&cases, &eval, &store).expect("batch");
-    assert_eq!(outs.len(), 1);
-  }
-
-  #[test]
-  fn batch_trace_on_file_eval_failure() {
-    unsafe {
-      std::env::set_var("ASSAY_TRACE", "1");
-    }
-    BATCH_NIX_FILE_EVAL.with(|c| {
-      c.set(Some(AssayOutcome::EvalError {
-        kind: "throw".into(),
-        message: "file fail".into(),
-        span: None,
-      }));
-    });
-    struct BatchFail;
-    impl EvalBackend for BatchFail {
-      fn eval_json(&self, expr: &str) -> EvalResult {
-        if expr.contains(BATCH_MARKER) {
-          EvalResult::Err(AssayOutcome::EvalError {
-            kind: "throw".into(),
-            message: "batch".into(),
-            span: None,
-          })
-        } else {
-          EvalResult::Ok(json!(1))
-        }
-      }
-    }
-    let cases = vec![(
-      "eq".into(),
-      Claim::Eq {
-        left_expr: "1".into(),
-        right_expr: "1".into(),
-      },
-    )];
-    let store = SnapshotStore::new(PathBuf::from("/tmp/assay-trace-fail"));
-    let _ = run_batch(&cases, &BatchFail, &store);
-    unsafe {
-      std::env::remove_var("ASSAY_TRACE");
-    }
-  }
-
-  #[test]
-  fn mock_batch_json_eval_delegates_to_inner() {
-    let inner = MockNixEval::default();
-    inner.set("plain", EvalResult::Ok(json!(42)));
-    let eval = MockBatchJsonEval {
-      inner,
-      results: json!({}),
+    let caps = ClaimCaps {
+      eval: Arc::new(eval),
+      snapshots: SnapshotStore::new(PathBuf::from("/tmp/assay-batch-trace")),
+      path_info: Arc::new(nixstore::MockPathInfoStore::default()),
+      fs: Arc::new(MemFs::default()),
     };
-    assert_eq!(eval.eval_json("plain"), EvalResult::Ok(json!(42)));
-  }
-
-  #[test]
-  fn run_batch_fallback_maps_interpret_infra_error() {
-    BATCH_NIX_FILE_EVAL.with(|c| {
-      c.set(Some(AssayOutcome::EvalError {
-        kind: "throw".into(),
-        message: "file".into(),
-        span: None,
-      }));
-    });
-    struct IoOnIsolate;
-    impl EvalBackend for IoOnIsolate {
-      fn eval_json(&self, expr: &str) -> EvalResult {
-        if expr.contains(BATCH_MARKER) {
-          EvalResult::Err(AssayOutcome::EvalError {
-            kind: "throw".into(),
-            message: "batch".into(),
-            span: None,
-          })
-        } else {
-          EvalResult::Err(AssayOutcome::EvalError {
-            kind: "io".into(),
-            message: "disk".into(),
-            span: None,
-          })
-        }
-      }
-    }
-    let cases = vec![(
-      "eq".into(),
-      Claim::Eq {
-        left_expr: "1".into(),
-        right_expr: "1".into(),
-      },
-    )];
-    let store = SnapshotStore::new(PathBuf::from("/tmp/assay-fallback-infra"));
-    let outs = run_batch(&cases, &IoOnIsolate, &store).expect("fallback");
-    assert!(matches!(outs[0].1, Exit::Failure(_)));
+    let _ = run_test(run_batch(one_eq(), caps, trace));
+    let notes = notes.lock().unwrap();
+    assert!(notes[0].starts_with("build_batch (1 slots"));
+    assert_eq!(notes[1], "eval_batch");
   }
 }

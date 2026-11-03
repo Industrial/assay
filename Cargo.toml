@@ -10,9 +10,23 @@ members = [
 
 # Single version and shared metadata for all workspace crates (inherit with version.workspace = true).
 [workspace.package]
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
+# id_effect 0.13 needs rustc >= 1.94.
+rust-version = "1.94"
 license = "MIT"
 authors = ["Industrial <tom.wieland@gmail.com>"]
 repository = "https://github.com/Industrial/assay"
 homepage = "https://github.com/Industrial/assay"
+
+# `cargo dylint` sets `cfg(dylint_lib = "…")`, used by the narrow `cfg_attr(…, allow(…))`s.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(dylint_lib, values("id_effect_lints"))',
+] }
+
+# id_effect's Dylint lints, pinned to the id_effect release in use (`moon run :lint-effect`).
+[workspace.metadata.dylint]
+libraries = [
+  { git = "https://github.com/Industrial/id_effect", tag = "v0.13.0", pattern = "lints/id_effect_lints" },
+]

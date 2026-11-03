@@ -78,6 +78,8 @@ priority = 3
 command = "biome"
 options = ["format", "--write"]
 includes = ["*.{js,jsx,ts,tsx,json}"]
+# Golden files are byte-exact test expectations; reformatting breaks them.
+excludes = ["crates/*/testdata/**", "crates/*/tests/golden/**"]
 priority = 4
 
 [formatter.yaml]

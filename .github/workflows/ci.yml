@@ -15,6 +15,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check
         run: cargo check --workspace
+      - name: id-effect doctor (one id_effect version)
+        run: |
+          cargo install id_effect_tool --version 0.13.0 --locked
+          id-effect doctor --json | tee doctor.json
+          jq -e '.ok and any(.checks[]; .name == "versions" and .status == "pass")' doctor.json
       - name: Test
         run: cargo test --workspace
       - name: Smoke (needs nix)
@@ -22,6 +27,15 @@ jobs:
           cargo build -p nix-assay --release
           ./target/release/assay run nix/assay/tests/smoke.assay.nix
           ./target/release/assay run nix/assay/tests/dogfood.assay.nix
+  lint-effect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      # Installs the lints' pinned nightly, cargo-dylint and dylint-link, then fails on any
+      # id_effect_lints warning.
+      - name: id_effect_lints (Dylint)
+        run: scripts/dylint.sh
   benchmark:
     needs: test
     runs-on: ubuntu-latest

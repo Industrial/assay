@@ -1,31 +1,52 @@
 //! nixfetch — fixed-output fetchers + NAR / flat hash verify (id_effect).
+//!
+//! All I/O goes through the [`Http`], [`Git`] and [`PathIo`] capabilities ([`caps`]; live
+//! adapters in [`live`]); hashing, NAR serialization and store-path math are pure. The network
+//! fetches are retried and bounded by timeouts ([`resilience`]).
 
 #![forbid(unsafe_code)]
+// id_effect_lints: `effect!`'s `~` binds lower to `.await`, which `no_await_outside_from_async`
+// flags (a false positive; real futures only run in `live`); pure hash / NAR / parse helpers
+// return `Result` by design and are lifted into `Effect` where a capability is involved.
+#![cfg_attr(
+  dylint_lib = "id_effect_lints",
+  allow(no_await_outside_from_async, no_result_return_in_pub_fn)
+)]
 
 pub mod caps;
 pub mod commands;
 pub mod error;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fake;
 pub mod hash_parse;
 pub mod ingest;
+pub mod live;
 pub mod nar;
+pub mod resilience;
 pub mod verify;
 
 #[cfg(test)]
 mod coverage_tests;
 
 pub use caps::{
-  ClockKey, FsPathIo, GitFetch, GitFetchKey, HttpFetch, HttpFetchKey, LiveGitFetch, LiveHttpFetch,
-  MockGitFetch, MockHttpFetch, MockPathIo, NixfetchEnv, PathIo, PathIoKey, StdClock,
-  live_providers, mock_env_with, mock_providers,
+  FetchGitEnv, FetchUrlEnv, FsNode, Git, GitService, Http, HttpService, NixfetchEnv, PathIo,
+  PathIoEnv, PathIoService, layer, layer_from,
 };
-pub use commands::{cmd_fetch_git, cmd_fetch_url, cmd_hash, cmd_store_path, cmd_verify};
+pub use commands::{
+  DigestReport, FetchGitReport, FetchUrlReport, StorePathReport, VerifyReport, checkout_verified,
+  digest_path, fetch_git, fetch_url, hash, store_path, store_path_report, verify,
+};
 pub use error::InfraError;
+#[cfg(any(test, feature = "test-support"))]
+pub use fake::{FakeGit, FakeHttp, MemFs, Reply};
 pub use hash_parse::{
   ExpectedHash, format_digest, format_hex, format_nix32, parse_expected_hash, verify_digest,
 };
-pub use ingest::{hash_flat_bytes, hash_flat_path};
-pub use nar::{hash_path_recursive, nar_bytes, nar_serialize};
-pub use verify::{digest_report, make_fixed_output_path};
+pub use ingest::hash_flat_bytes;
+pub use live::{FsPathIo, LiveGit, LiveHttp};
+pub use nar::{hash_nar, nar_bytes, nar_serialize};
+pub use resilience::{RetryPolicy, with_retry};
+pub use verify::make_fixed_output_path;
 
 pub use id_effect::Exit;
 
@@ -46,20 +67,5 @@ mod id_effect_dep_smoke {
     use std::process::ExitCode;
     let code = exit_code_for_exit(Exit::<(), ()>::succeed(()));
     assert_eq!(code, ExitCode::SUCCESS);
-  }
-
-  #[test]
-  fn smoke_hash_flat() {
-    use id_effect::{FromEnv, build_env, run_test};
-    use std::path::PathBuf;
-
-    use super::{NixfetchEnv, cmd_hash, mock_providers};
-
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/flat/hello");
-    let env = NixfetchEnv::from_env(build_env(mock_providers()).expect("env"));
-    assert!(matches!(
-      run_test(cmd_hash(path, false), env),
-      Exit::Success(_)
-    ));
   }
 }

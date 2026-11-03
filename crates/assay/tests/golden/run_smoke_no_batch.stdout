@@ -1,0 +1,74 @@
+[
+  {
+    "name": "add",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "attrGet",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "boolAnd",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "hasAttrsSmoke",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "listConcat",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "listLength",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "nullLit",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "stringConcat",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "subsetSmoke",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "throwsBoom",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "throwsType",
+    "outcome": {
+      "kind": "pass"
+    }
+  },
+  {
+    "name": "typeOfInt",
+    "outcome": {
+      "kind": "pass"
+    }
+  }
+]

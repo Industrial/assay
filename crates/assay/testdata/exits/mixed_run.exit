@@ -1,0 +1,82 @@
+Success([
+    (
+        "eq_fail",
+        Success(
+            AssertFail {
+                claim: "eq",
+                left: Some(
+                    Number(1),
+                ),
+                right: Some(
+                    Object {
+                        "a": Array [
+                            Number(2),
+                        ],
+                    },
+                ),
+                diff: "~ $: 1 -> {\"a\":[2]}",
+            },
+        ),
+    ),
+    (
+        "eq_pass",
+        Success(
+            Pass,
+        ),
+    ),
+    (
+        "eval_error",
+        Success(
+            EvalThrow {
+                kind: "type",
+                message: "value is a set while a list was expected",
+            },
+        ),
+    ),
+    (
+        "io_error",
+        Failure(
+            Fail(
+                Io(
+                    "nix: spawn failed",
+                ),
+            ),
+        ),
+    ),
+    (
+        "law",
+        Success(
+            Pass,
+        ),
+    ),
+    (
+        "slow",
+        Failure(
+            Fail(
+                Timeout {
+                    case: "slow",
+                    limit_ms: 250,
+                },
+            ),
+        ),
+    ),
+    (
+        "throws_fail",
+        Success(
+            AssertFail {
+                claim: "throws",
+                left: Some(
+                    Number(1),
+                ),
+                right: None,
+                diff: "expression evaluated successfully; expected throw",
+            },
+        ),
+    ),
+    (
+        "throws_pass",
+        Success(
+            Pass,
+        ),
+    ),
+])
