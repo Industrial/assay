@@ -1,0 +1,63 @@
+name: Bug report
+description: Something in assay, nixq, nixdrv, nixstore or nixfetch behaves wrongly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Security issues go to the [advisories page](https://github.com/Industrial/assay/security/advisories/new) instead.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `assay --version` (or the affected bin's).
+      placeholder: assay 0.3.0
+    validations:
+      required: true
+  - type: input
+    id: nix-version
+    attributes:
+      label: Nix version
+      description: Output of `nix --version`.
+      placeholder: nix (Nix) 2.28.3
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and architecture
+      placeholder: NixOS 25.05, x86_64-linux
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installed via
+      options:
+        - nix run / flake
+        - cargo install
+        - release binary / shell installer
+        - built from source
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: A minimal suite (`*.assay.nix`) or input, and the exact command line.
+      render: nix
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+      description: What you expected, what happened, and the exit code (`echo $?`).
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: Full stdout and stderr.
+      render: text
