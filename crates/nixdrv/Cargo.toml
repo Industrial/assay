@@ -30,7 +30,7 @@ id_effect.workspace = true
 id_effect_cli.workspace = true
 
 [dev-dependencies]
-rstest = "0.23"
+rstest = "0.28"
 nixq = { workspace = true, features = ["test-support"] }
 bin-contract-support.workspace = true
 
