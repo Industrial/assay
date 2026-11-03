@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "cursor-setup": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793697451,
+        "narHash": "sha256-R3xefF1skbRzFXC//PQBvOsFWAR3L2jZhu51yOoVGiA=",
+        "owner": "Industrial",
+        "repo": "cursor-setup",
+        "rev": "a690ebe20b3b2d767e2650ec4253ffd88ee2ab3a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "Industrial",
+        "repo": "cursor-setup",
+        "rev": "a690ebe20b3b2d767e2650ec4253ffd88ee2ab3a",
+        "type": "github"
+      }
+    },
     "definitively": {
       "inputs": {
         "nixpkgs": [
@@ -191,6 +208,7 @@
     },
     "root": {
       "inputs": {
+        "cursor-setup": "cursor-setup",
         "definitively": "definitively",
         "devenv": "devenv",
         "git-hooks": "git-hooks",

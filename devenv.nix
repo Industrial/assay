@@ -5,11 +5,10 @@
   pkgs,
   ...
 }: {
-  imports = [./.cursor/nix];
-
   name = "assay";
 
-  # Shared modules from `.cursor/nix` — defaults are off; enable what this repo needs.
+  # Shared modules from the `cursor-setup` input (devenv.yaml) — defaults are off; enable what
+  # this repo needs.
   cursor.features.program-moon.enable = true;
   cursor.features.program-lean-ctx.enable = true;
   cursor.features.program-roam-code.enable = true;

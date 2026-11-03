@@ -1,8 +1,31 @@
-# Shared input defaults (nixpkgs, rust-overlay, git-hooks, nixpkgs-python, …)
-# live in `.cursor/nix/devenv.yaml`. Project-only pins stay here.
+# Shared devenv modules (`cursor.features.*`) come from Industrial/cursor-setup, pinned here
+# and locked in devenv.lock; bump the rev, then `devenv update cursor-setup`. The input
+# defaults that repo declares are repeated so this file alone describes the environment.
 imports:
-  - ./.cursor/nix
+  - cursor-setup/nix
 inputs:
+  cursor-setup:
+    url: github:Industrial/cursor-setup/a690ebe20b3b2d767e2650ec4253ffd88ee2ab3a
+    flake: false
+  nixpkgs:
+    url: github:cachix/devenv-nixpkgs/rolling
+  nixpkgs-unstable:
+    url: github:nixos/nixpkgs/nixos-unstable
+  rust-overlay:
+    url: github:oxalica/rust-overlay
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+  git-hooks:
+    url: github:cachix/git-hooks.nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+  nixpkgs-python:
+    url: github:cachix/nixpkgs-python
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
   definitively:
     url: github:Industrial/definitively/definitively-v0.4.1
     flake: true

@@ -66,3 +66,8 @@ yarn-error.log*
 
 # Keep Nix store fixture DBs
 !crates/**/fixtures/**/*.sqlite
+
+# Agent/editor tooling lives outside this repo (cursor-setup devenv input, .claude-setup submodule)
+/.cursor/
+/.codex/
+/.openskills/
