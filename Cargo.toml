@@ -32,7 +32,7 @@ bin-contract-support = { path = "crates/bin-contract-support" }
 id_effect = "0.13.0"
 id_effect_cli = "0.13.0"
 
-base64 = "0.22"
+base64 = "0.23"
 clap = { version = "4.4", features = ["derive"] }
 hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
