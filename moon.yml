@@ -62,8 +62,34 @@ tasks:
       - '**/*.rs'
     options:
       cache: false
+  # blaze is the default Rust build command: it keeps the workspace compiled in
+  # a daemon and rebuilds only what changed. Moon caching stays off for the
+  # blaze targets — blaze has its own content-addressed store and is already
+  # faster than a moon cache lookup, and double-caching only hides staleness.
   build:
-    description: 'Build the workspace with cargo'
+    description: 'Build the workspace with blaze'
+    command: 'blaze'
+    args: ['build', '--workspace']
+    inputs:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**/*.rs'
+    options:
+      cache: false
+      outputStyle: buffer-only-failure
+  check:
+    description: 'Check the workspace compiles (blaze)'
+    command: 'blaze'
+    args: ['check', '--workspace', '--all-features']
+    inputs:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**/*.rs'
+    options:
+      cache: false
+      outputStyle: buffer-only-failure
+  cargo-build:
+    description: 'Build the workspace with cargo (rustc verification path)'
     command: 'cargo'
     args: ['build']
     inputs:
@@ -73,8 +99,8 @@ tasks:
     options:
       cache: true
       outputStyle: buffer-only-failure
-  check:
-    description: 'Check the workspace compiles'
+  cargo-check:
+    description: 'Check the workspace with cargo — rustc is the final word on the verdict'
     command: 'cargo'
     args: ['check', '--workspace', '--all-features']
     inputs:
@@ -106,7 +132,19 @@ tasks:
     options:
       outputStyle: buffer-only-failure
   test:
-    description: 'Run tests with nextest'
+    description: 'Run tests with blaze (unit, integration and doctests)'
+    command: 'blaze'
+    args: ['test', '--workspace']
+    inputs:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '**/*.rs'
+      - 'tests/**/*'
+    options:
+      cache: false
+      outputStyle: buffer-only-failure
+  cargo-test:
+    description: 'Run tests with nextest under rustc — the verification path'
     command: 'cargo'
     args: ['nextest', 'run']
     inputs:

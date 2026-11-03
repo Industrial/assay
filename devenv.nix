@@ -10,6 +10,10 @@
   name = "assay";
 
   # Shared modules from `.cursor/nix` — defaults are off; enable what this repo needs.
+  # blaze is the default Rust build/check/run/test command (see moon.yml). It
+  # ships its own toolchain, so languages-rust and packages-rust-dev stay on:
+  # rust-analyzer, clippy, rustfmt and the cargo-* helpers are still cargo's.
+  cursor.features.program-blaze.enable = true;
   cursor.features.program-moon.enable = true;
   cursor.features.program-lean-ctx.enable = true;
   cursor.features.program-roam-code.enable = true;
@@ -41,7 +45,7 @@
     # Preserve this repo's Moon gate composition (not the shared ci-* defaults).
     preCommitTargets = ":format :check :lint :test";
     # :lint-effect (Dylint) runs on push and in CI only: its first run installs a nightly.
-    prePushTargets = ":format :check :lint :lint-effect :build :test :audit :check-docs";
+    prePushTargets = ":format :check :lint :lint-effect :build :test :cargo-check :cargo-test :audit :check-docs";
   };
   cursor.features.git-hooks-prek.enable = true;
 

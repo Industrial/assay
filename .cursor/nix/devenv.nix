@@ -2,6 +2,7 @@
 # Also imported via Nix as `./.cursor/nix` → default.nix → this file.
 {
   imports = [
+    ./features/program-blaze.nix
     ./features/program-moon.nix
     ./features/program-roam-code.nix
     ./features/program-lean-ctx.nix
