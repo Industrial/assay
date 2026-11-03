@@ -290,13 +290,14 @@ mod tests {
     ]
   }
 
-  /// A size that every shrink step strictly decreases (or leaves the value fixed).
-  fn weight(value: &Value) -> u64 {
+  /// A size that every shrink step strictly decreases (or leaves the value fixed). `u128`: a
+  /// few `u64` numbers in one tree already overflow a `u64` sum.
+  fn weight(value: &Value) -> u128 {
     match value {
-      Value::Array(items) => 1 + items.iter().map(weight).sum::<u64>(),
-      Value::Object(map) => 1 + map.values().map(weight).sum::<u64>(),
-      Value::String(text) => 1 + text.chars().count() as u64,
-      Value::Number(n) => 1 + n.as_u64().unwrap_or(0),
+      Value::Array(items) => 1 + items.iter().map(weight).sum::<u128>(),
+      Value::Object(map) => 1 + map.values().map(weight).sum::<u128>(),
+      Value::String(text) => 1 + text.chars().count() as u128,
+      Value::Number(n) => 1 + u128::from(n.as_u64().unwrap_or(0)),
       _ => 1,
     }
   }
