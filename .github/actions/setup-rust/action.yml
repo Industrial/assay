@@ -1,0 +1,49 @@
+name: setup-rust
+description: >-
+  Install the Rust toolchain with the runner's rustup. Uses rust-toolchain.toml when the repo has one (the pinned channel and its components), else stable; `toolchain` overrides both (exported as RUSTUP_TOOLCHAIN, which rustup prefers over rust-toolchain.toml).
+inputs:
+  toolchain:
+    description: Toolchain to use instead of rust-toolchain.toml / stable (e.g. the MSRV).
+    required: false
+    default: ""
+  components:
+    description: Extra components (space-separated), e.g. "clippy rustfmt".
+    required: false
+    default: ""
+outputs:
+  rustc-version:
+    description: "`rustc --version` of the active toolchain."
+    value: ${{ steps.show.outputs.rustc-version }}
+runs:
+  using: composite
+  steps:
+    - name: Install toolchain
+      shell: bash
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
+        COMPONENTS: ${{ inputs.components }}
+      run: |
+        set -euo pipefail
+        rustup set profile minimal
+        if [[ -n "$TOOLCHAIN" ]]; then
+          rustup toolchain install "$TOOLCHAIN" --no-self-update
+          echo "RUSTUP_TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
+          export RUSTUP_TOOLCHAIN="$TOOLCHAIN"
+        elif [[ -f rust-toolchain.toml || -f rust-toolchain ]]; then
+          # rustup >= 1.28: no argument installs the toolchain the override file names.
+          rustup toolchain install --no-self-update
+        else
+          rustup toolchain install stable --no-self-update
+          rustup default stable
+        fi
+        if [[ -n "$COMPONENTS" ]]; then
+          # shellcheck disable=SC2086 # word splitting is the point
+          rustup component add $COMPONENTS
+        fi
+    - name: Show toolchain
+      id: show
+      shell: bash
+      run: |
+        rustc --version --verbose
+        cargo --version
+        echo "rustc-version=$(rustc --version)" >> "$GITHUB_OUTPUT"

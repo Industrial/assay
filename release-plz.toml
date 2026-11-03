@@ -1,0 +1,87 @@
+# release-plz (https://release-plz.dev) — run by .github/workflows/release-plz.yml.
+#
+# * Every push to main opens/updates one release PR: version bump (all five crates share the
+#   workspace version) + a new section in the root CHANGELOG.md (Keep a Changelog).
+# * Merging that PR publishes the crates to crates.io in dependency order and pushes ONE tag,
+#   `v<version>`. The tag starts .github/workflows/release.yml (cargo-dist), which builds the
+#   binaries and creates the GitHub release; release-plz creates no GitHub release itself, so
+#   there is exactly one release creator.
+
+[workspace]
+# Only release when a release PR is merged, not on every push with an unpublished version.
+release_always = false
+# Dependabot owns dependency updates; the release PR only bumps versions and the changelog.
+dependencies_update = false
+# One tag / changelog for the whole workspace, carried by `nix-assay` below.
+changelog_update = false
+git_tag_enable = false
+git_release_enable = false
+pr_labels = ["release"]
+pr_branch_prefix = "release-plz-"
+
+[[package]]
+name = "nix-assay"
+version_group = "assay"
+changelog_update = true
+changelog_path = "./CHANGELOG.md"
+# The library crates' commits go into the same single changelog.
+changelog_include = ["nixq", "nixdrv", "nixstore", "nixfetch"]
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+# cargo-dist creates the GitHub release from the tag (with notes from CHANGELOG.md).
+git_release_enable = false
+
+[[package]]
+name = "nixq"
+version_group = "assay"
+
+[[package]]
+name = "nixdrv"
+version_group = "assay"
+
+[[package]]
+name = "nixstore"
+version_group = "assay"
+
+[[package]]
+name = "nixfetch"
+version_group = "assay"
+
+[changelog]
+header = """# Changelog
+
+All notable changes to this workspace (`nix-assay`, `nixq`, `nixdrv`, `nixstore`, `nixfetch`)
+are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and the workspace uses [Semantic Versioning](https://semver.org/) with one shared version.
+"""
+# Keep a Changelog headings (`## [x.y.z] - date`, `### Added` …), matching the hand-written
+# history; dist reads the section for the release notes. The `<!-- n -->` prefixes only order
+# the groups and are stripped.
+body = """
+
+## [{{ version }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+
+{% for commit in commits -%}
+- {% if commit.scope %}*({{ commit.scope }})* {% endif %}{% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message | upper_first }}
+{% endfor -%}
+{% endfor %}
+"""
+# Breaking feat/fix/refactor commits are never skipped anyway; this keeps `chore!`/`test!` out.
+protect_breaking_commits = false
+sort_commits = "oldest"
+commit_parsers = [
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^feat", group = "<!-- 0 -->Added" },
+  { message = "^(refactor|perf)", group = "<!-- 1 -->Changed" },
+  { message = "^deprecat", group = "<!-- 2 -->Deprecated" },
+  { message = "^remove", group = "<!-- 3 -->Removed" },
+  { message = "^fix\\(deps\\)", group = "<!-- 1 -->Changed" },
+  { message = "^fix", group = "<!-- 4 -->Fixed" },
+  { message = "^security", group = "<!-- 5 -->Security" },
+  { body = ".*security", group = "<!-- 5 -->Security" },
+  # Internal-only commits stay out of the user-facing changelog.
+  { message = "^(ci|test|style|build|chore|docs)", skip = true },
+  { message = ".*", group = "<!-- 1 -->Changed" },
+]
