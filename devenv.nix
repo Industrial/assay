@@ -64,5 +64,7 @@
   # Project-only packages (beads removed upstream in favor of Maestro).
   packages = [
     inputs.definitively.packages.${pkgs.stdenv.hostPlatform.system}.definitively
+    # `moon run :deny` (advisories, licenses, bans, sources — deny.toml).
+    pkgs.cargo-deny
   ];
 }
