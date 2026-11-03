@@ -1,5 +1,5 @@
 # Weekly dependency updates: minor/patch bumps grouped into one PR per ecosystem, majors one
-# PR each. Commit messages follow conventional commits so release-plz files them correctly.
+# PR each. Commit messages follow conventional commits, like the rest of the history.
 version: 2
 updates:
   - package-ecosystem: cargo
