@@ -1,0 +1,7 @@
+# Toolchain for local development and CI (rustup reads this file; devenv.nix feeds it to
+# `languages.rust.toolchainFile`). MSRV is separate: `rust-version` in Cargo.toml.
+[toolchain]
+channel = "1.94.0"
+profile = "minimal"
+# llvm-tools: `cargo llvm-cov` (`moon run :coverage`); rust-analyzer: editors in devenv.
+components = ["clippy", "rustfmt", "llvm-tools", "rust-analyzer"]

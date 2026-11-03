@@ -20,10 +20,13 @@
   cursor.features.env-python-ld.enable = true;
   cursor.features.languages-javascript.enable = true;
 
+  # The toolchain comes from rust-toolchain.toml (same file rustup reads in CI).
+  # `toolchainFile` requires the channel/version left at "nixpkgs"/"latest".
   cursor.features.languages-rust = {
     enable = true;
-    channel = "stable";
+    channel = "nixpkgs";
   };
+  languages.rust.toolchainFile = ./rust-toolchain.toml;
 
   # uv venv at `.devenv/state/venv` — Serena MCP (`scripts/serena-mcp-wrapper.sh`);
   # see pyproject.toml [dependency-groups].
