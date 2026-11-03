@@ -118,6 +118,7 @@ pub fn verify_digest(expected: &ExpectedHash, actual: &[u8; 32]) -> Result<(), I
   }
 }
 
+/// SRI form `sha256-<base64>`.
 pub fn format_digest(digest: &[u8; 32]) -> String {
   format!("sha256-{}", B64.encode(digest))
 }
@@ -127,6 +128,7 @@ pub fn format_nix32(digest: &[u8; 32]) -> String {
   nix32_encode_bytes(digest)
 }
 
+/// Lowercase hex form (64 chars).
 pub fn format_hex(digest: &[u8; 32]) -> String {
   hex::encode(digest)
 }

@@ -14,22 +14,32 @@ use crate::files::{EntryKind, Fs};
 use crate::schema::decode_compat_cases;
 use crate::verdict::InfraError;
 
+/// One `{ expr; expected; }` test of a compat suite.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompatCase {
+  /// Test name (the attribute name in the suite).
   pub name: String,
+  /// Nix expression under test.
   pub expr: String,
+  /// Nix expression for the expected value.
   pub expected: String,
 }
 
+/// A loaded nix-unit / `lib.runTests` suite.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompatSuite {
+  /// The suite's test cases.
   pub cases: Vec<CompatCase>,
 }
 
+/// The claim a compat case asserts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompatClaim {
+  /// The two Nix expressions evaluate to equal values.
   Eq {
+    /// The case's `expr`.
     left_expr: String,
+    /// The case's `expected`.
     right_expr: String,
   },
 }

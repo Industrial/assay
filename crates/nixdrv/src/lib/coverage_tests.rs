@@ -49,6 +49,9 @@ fn fs_drv_source_missing_file_errors() {
   assert!(matches!(err, nixq::InfraError::Io { .. }));
 }
 
+// Test-only: swaps fd 0 for a pipe via libc dup/dup2 so `-` reads known bytes, then restores
+// it. std has no safe API to redirect the process's own stdin.
+#[allow(unsafe_code)]
 #[cfg(unix)]
 #[test]
 fn fs_drv_source_reads_stdin_dash() {

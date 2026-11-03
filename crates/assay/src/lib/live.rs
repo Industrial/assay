@@ -292,6 +292,7 @@ struct LazyStore {
 }
 
 impl LazyPathInfoStore {
+  /// A store for the Nix store at `store_root`; its database is opened on first query.
   pub fn new(store_root: impl Into<PathBuf>) -> Self {
     Self {
       inner: Arc::new(LazyStore {

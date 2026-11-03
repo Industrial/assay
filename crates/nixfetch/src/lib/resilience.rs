@@ -32,9 +32,13 @@ pub const OVERALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// Retry and timeout settings of one fetch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
+  /// Bound on each single attempt.
   pub attempt_timeout: Duration,
+  /// Maximum number of retries after the first attempt.
   pub retries: u64,
+  /// Delay before the first retry; doubled for each further one.
   pub base_delay: Duration,
+  /// Bound on all attempts together.
   pub overall_timeout: Duration,
   /// Scale every delay by a random factor in `[0.8, 1.2]` (off for exact-timing tests).
   pub jitter: bool,

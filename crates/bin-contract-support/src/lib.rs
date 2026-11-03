@@ -8,6 +8,9 @@
 //! The suites read workspace files (sibling fixtures, `nix/assay/tests`), so they are
 //! excluded from the packaged crates; this crate is never published.
 
+// A test harness: a failed `expect` is the test failure, with the message as its report.
+#![allow(clippy::expect_used)]
+
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};

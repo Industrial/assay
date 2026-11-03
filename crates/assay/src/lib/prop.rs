@@ -30,14 +30,17 @@ pub struct Gen {
 }
 
 impl Gen {
+  /// A generator seeded with `seed` (`0` is treated as `1`).
   pub fn new(seed: u64) -> Self {
     Self { state: seed.max(1) }
   }
 
+  /// A pseudo-random boolean.
   pub fn gen_bool(&mut self) -> bool {
     self.next_u64() & 1 == 0
   }
 
+  /// A value in `0..max_exclusive` (`0` when `max_exclusive <= 1`).
   pub fn gen_u32(&mut self, max_exclusive: u32) -> u32 {
     if max_exclusive <= 1 {
       return 0;
@@ -45,6 +48,7 @@ impl Gen {
     (self.next_u64() % u64::from(max_exclusive)) as u32
   }
 
+  /// A string of up to `max_len` printable ASCII characters.
   pub fn gen_string(&mut self, max_len: usize) -> String {
     let len = if max_len == 0 {
       0
@@ -59,6 +63,7 @@ impl Gen {
       .collect()
   }
 
+  /// A JSON value nested at most `depth` levels of arrays/objects (`0` yields a scalar).
   pub fn gen_json(&mut self, depth: u32) -> Value {
     if depth == 0 {
       return self.gen_leaf();

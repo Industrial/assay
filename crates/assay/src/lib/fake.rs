@@ -71,6 +71,7 @@ pub struct MockNixEval {
 }
 
 impl MockNixEval {
+  /// Script the result of evaluating the expression `expr`.
   pub fn set(&self, expr: &str, result: EvalResult) {
     self
       .values
@@ -79,6 +80,7 @@ impl MockNixEval {
       .insert(expr.into(), result);
   }
 
+  /// Script the result of evaluating the file at `path`.
   pub fn set_file(&self, path: impl Into<PathBuf>, result: EvalResult) {
     self
       .files

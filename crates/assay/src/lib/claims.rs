@@ -26,74 +26,122 @@ use nixq::{normalize_value, structural_diff, value_contains_subset, value_has_at
 /// A single test claim authored in Nix and interpreted by the runner.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Claim {
+  /// Evaluate both Nix expressions and assert their normalized values are equal.
   Eq {
+    /// Nix expression for the left side.
     left_expr: String,
+    /// Nix expression for the right side.
     right_expr: String,
   },
   /// Already-evaluated sides from suite JSON (first-class Nix authoring).
   EqValues {
+    /// Evaluated left side.
     left: Value,
+    /// Evaluated right side.
     right: Value,
   },
+  /// Assert evaluating `expr` throws (optionally with a message containing `pattern`).
   Throws {
+    /// Nix expression expected to throw.
     expr: String,
+    /// Substring the throw message must contain; `None` accepts any throw.
     pattern: Option<String>,
   },
+  /// Assert `expected_subset` is a structural subset of the value of `expr`.
   Subset {
+    /// Nix expression producing the actual value.
     expr: String,
+    /// Value that must be contained in the actual value.
     expected_subset: Value,
   },
+  /// [`Claim::Subset`] on an already-evaluated actual value.
   SubsetValues {
+    /// Evaluated actual value.
     actual: Value,
+    /// Value that must be contained in `actual`.
     expected_subset: Value,
   },
+  /// Assert the value of `expr` has all of `attrs`.
   HasAttrs {
+    /// Nix expression producing the value to inspect.
     expr: String,
+    /// Attribute names that must be present.
     attrs: Vec<String>,
   },
+  /// [`Claim::HasAttrs`] on an already-evaluated value.
   HasAttrsValues {
+    /// Evaluated value to inspect.
     actual: Value,
+    /// Attribute names that must be present.
     attrs: Vec<String>,
   },
+  /// Parse the value of `expr` as a derivation, project `project`, and assert `expected` is a
+  /// subset of the projection.
   Drv {
+    /// Nix expression producing derivation JSON.
     expr: String,
+    /// Derivation fields to project before comparing.
     project: Vec<String>,
+    /// Expected subset of the projected derivation.
     expected: Value,
   },
+  /// [`Claim::Drv`] on already-evaluated derivation JSON.
   DrvValues {
+    /// Evaluated derivation JSON.
     actual: Value,
+    /// Derivation fields to project before comparing.
     project: Vec<String>,
+    /// Expected subset of the projected derivation.
     expected: Value,
   },
+  /// Compare the normalized value of `expr` against the golden snapshot `name`.
   Snapshot {
+    /// Golden name (stored as `{root}/{name}.json`).
     name: String,
+    /// Nix expression whose value is snapshotted.
     expr: String,
   },
+  /// Assert evaluating `expr` forces `paths` (currently always fails as unsupported).
   Forces {
+    /// Nix expression to evaluate.
     expr: String,
+    /// Attribute paths expected to be forced.
     paths: Vec<String>,
   },
+  /// Evaluate a NixOS-style module set and assert `expect` is a subset of its `config`.
   Module {
+    /// Nix expression for the `modules` list passed to `lib.evalModules`.
     imports_expr: String,
+    /// Nix expression for the `specialArgs` passed to `lib.evalModules`.
     args_expr: String,
+    /// Expected subset of the evaluated `config`.
     expect: Value,
   },
   /// Run a built-in algebraic law by name.
   Law {
+    /// Law name.
     name: String,
+    /// RNG seed for generated inputs.
     seed: u64,
   },
   /// Run a built-in property check by name.
   Prop {
+    /// Property name.
     name: String,
+    /// RNG seed for generated inputs.
     seed: u64,
+    /// Number of trials (default 128).
     trials: Option<u32>,
   },
   /// Assert `expect` is a structural subset of store path-info JSON.
   PathInfo {
+    /// Store path to query.
     path: String,
+    /// Expected subset of the path-info JSON.
     expect: Value,
+    /// Whether to include referrers in the queried path info.
     referrers: bool,
+    /// Whether to include the closure size in the queried path info.
     closure_size: bool,
   },
 }
@@ -102,8 +150,11 @@ pub enum Claim {
 /// its own part (see [`interpret_with`]).
 #[derive(Clone)]
 pub struct ClaimCaps {
+  /// Nix evaluator for claims that evaluate expressions.
   pub eval: Arc<dyn NixEval>,
+  /// Golden store for `snapshot` claims.
   pub snapshots: SnapshotStore,
+  /// Store path-info backend for `pathInfo` claims.
   pub path_info: Arc<dyn PathInfoStore>,
   /// Snapshot goldens (and, for a run, suite files and discovery).
   pub fs: Arc<dyn Fs>,
@@ -336,6 +387,8 @@ fn judge_throw(out: AssayOutcome, pattern: Option<&str>) -> AssayOutcome {
   }
 }
 
+/// Nix expression evaluating `imports_expr` as modules with `args_expr` as `specialArgs`
+/// (via nixpkgs `lib.evalModules`) and returning the resulting `config`.
 pub fn build_module_eval_expr(imports_expr: &str, args_expr: &str) -> String {
   format!(
     "let lib = (import <nixpkgs> {{}}).lib; eval = lib.evalModules {{ modules = {imports_expr}; specialArgs = {args_expr}; }}; in eval.config"

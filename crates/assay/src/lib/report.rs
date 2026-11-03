@@ -16,9 +16,12 @@ use crate::verdict::InfraError;
 /// Output format for assay run reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReportFormat {
+  /// Human-readable lines (the default).
   #[default]
   Human,
+  /// A JSON document.
   Json,
+  /// TAP (Test Anything Protocol).
   Tap,
 }
 
@@ -37,6 +40,7 @@ impl ReportFormat {
 /// One formatted output line (or block) of a report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportLine {
+  /// The rendered text.
   pub body: String,
 }
 

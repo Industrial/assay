@@ -7,17 +7,22 @@ use crate::error::PathError;
 /// One segment of an attrpath.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathSegment {
+  /// An object key (`.key` or `["key"]`).
   Key(String),
+  /// An array index (`[n]`).
   Index(usize),
 }
 
 /// Parsed attrpath (ordered segments).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttrPath {
+  /// Segments from the root; empty is the root itself (`$`).
   pub segments: Vec<PathSegment>,
 }
 
 impl AttrPath {
+  /// Canonical text form: `$`, then `.key` for identifier keys, `["key"]` (escaped) for
+  /// other keys and `[n]` for indices.
   pub fn display(&self) -> String {
     let mut out = String::from("$");
     for seg in &self.segments {

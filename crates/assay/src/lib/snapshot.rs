@@ -14,11 +14,14 @@ use crate::verdict::InfraError;
 /// Where named JSON snapshot goldens live (`{root}/{name}.json`) and whether to rewrite them.
 #[derive(Debug, Clone)]
 pub struct SnapshotStore {
+  /// Directory holding the golden files.
   pub root: PathBuf,
+  /// Rewrite goldens with observed values instead of comparing (`--update-snapshots`).
   pub update_snapshots: bool,
 }
 
 impl SnapshotStore {
+  /// A store rooted at `root` that compares (does not update) goldens.
   pub fn new(root: impl Into<PathBuf>) -> Self {
     Self {
       root: root.into(),

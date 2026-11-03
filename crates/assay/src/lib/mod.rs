@@ -32,6 +32,7 @@ pub mod prop;
 pub mod report;
 pub mod run;
 pub mod schema;
+/// Rust-side evaluation of a tiny subset of Nix expressions (literals and `+`).
 pub mod simple_eval;
 pub mod snapshot;
 pub mod verdict;

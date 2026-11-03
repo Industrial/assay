@@ -38,12 +38,16 @@ fn render_json<T: Serialize>(output: &T) -> Result<String, InfraError> {
 /// A sha256 digest in its three spellings (`hash` output).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DigestReport {
+  /// Lowercase hex (64 chars).
   pub hex: String,
+  /// Nix base32 (52 chars).
   pub nix32: String,
+  /// SRI `sha256-<base64>`.
   pub sri: String,
 }
 
 impl DigestReport {
+  /// All three spellings of `digest`.
   pub fn of(digest: &[u8; 32]) -> Self {
     Self {
       hex: format_hex(digest),
@@ -61,9 +65,13 @@ impl DigestReport {
 /// `verify` output: the digest that matched.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VerifyReport {
+  /// Digest in lowercase hex.
   pub hex: String,
+  /// Always `true` (a mismatch is an error, not a report).
   pub matched: bool,
+  /// Digest in Nix base32.
   pub nix32: String,
+  /// Digest in SRI form.
   pub sri: String,
 }
 
@@ -87,14 +95,21 @@ impl VerifyReport {
 /// `fetch-url` output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FetchUrlReport {
+  /// Flat digest of the download in lowercase hex.
   pub hex: String,
+  /// Always `true` (a mismatch is an error, not a report).
   pub matched: bool,
+  /// Flat digest in Nix base32.
   pub nix32: String,
+  /// Where the verified download was written, if an output path was given.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub out: Option<String>,
+  /// Flat digest in SRI form.
   pub sri: String,
+  /// Flat fixed-output store path, if a name was given.
   #[serde(rename = "storePath", skip_serializing_if = "Option::is_none")]
   pub store_path: Option<String>,
+  /// The downloaded URL.
   pub url: String,
 }
 
@@ -108,14 +123,22 @@ impl FetchUrlReport {
 /// `fetch-git` output; `out` is where the verified tree now is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FetchGitReport {
+  /// NAR digest of the tree (without `.git`) in lowercase hex.
   pub hex: String,
+  /// Always `true` (a mismatch is an error, not a report).
   pub matched: bool,
+  /// NAR digest in Nix base32.
   pub nix32: String,
+  /// Directory holding the verified tree.
   pub out: String,
+  /// The checked-out revision.
   pub rev: String,
+  /// NAR digest in SRI form.
   pub sri: String,
+  /// Recursive fixed-output store path, if a name was given.
   #[serde(rename = "storePath", skip_serializing_if = "Option::is_none")]
   pub store_path: Option<String>,
+  /// The repository URL.
   pub url: String,
 }
 
@@ -129,9 +152,13 @@ impl FetchGitReport {
 /// `store-path` output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StorePathReport {
+  /// The full digest the path was computed from.
   pub digest: DigestReport,
+  /// Nix-base32 hash part of the store path.
   pub hash: String,
+  /// Name part of the store path.
   pub name: String,
+  /// Full store path (under the given or default store directory).
   pub path: String,
 }
 

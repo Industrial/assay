@@ -31,13 +31,18 @@ fn render_json<T: Serialize>(output: &T) -> Result<String, InfraError> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum OutputReport {
+  /// Input-addressed output: printed as the bare path string.
   Path(String),
   // Fields in key order: the printed object keeps declaration order.
+  /// Fixed-output output: printed as an object with its hash data and path.
   Fixed {
+    /// Expected output hash, if present.
     #[serde(skip_serializing_if = "Option::is_none")]
     hash: Option<String>,
+    /// Hash algorithm (printed as `hashAlgo`), if present.
     #[serde(rename = "hashAlgo", skip_serializing_if = "Option::is_none")]
     hash_algo: Option<String>,
+    /// Output store path.
     path: String,
   },
 }
@@ -47,20 +52,28 @@ pub enum OutputReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DerivationReport {
+  /// Builder arguments.
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub args: Vec<String>,
+  /// Builder executable path.
   #[serde(skip_serializing_if = "String::is_empty")]
   pub builder: String,
+  /// Builder environment variables.
   #[serde(skip_serializing_if = "BTreeMap::is_empty")]
   pub env: BTreeMap<String, String>,
+  /// Input derivations mapped to the output names used from each (`inputDrvs`).
   #[serde(skip_serializing_if = "BTreeMap::is_empty")]
   pub input_drvs: BTreeMap<String, Vec<String>>,
+  /// Input source store paths (`inputSrcs`).
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub input_srcs: Vec<String>,
+  /// Derivation name (explicit field or `env.name`).
   #[serde(skip_serializing_if = "Option::is_none")]
   pub name: Option<String>,
+  /// Outputs keyed by output name.
   #[serde(skip_serializing_if = "BTreeMap::is_empty")]
   pub outputs: BTreeMap<String, OutputReport>,
+  /// Build platform / system.
   #[serde(skip_serializing_if = "String::is_empty")]
   pub platform: String,
 }
@@ -107,6 +120,7 @@ impl DerivationReport {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct Projection {
+  /// Selected field names mapped to their JSON values.
   pub fields: Map<String, Value>,
 }
 
@@ -120,8 +134,11 @@ impl Projection {
 /// `store-path parse` output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StorePathReport {
+  /// Nix-base32 hash part.
   pub hash: String,
+  /// Name part.
   pub name: String,
+  /// Full path under the default store directory.
   pub path: String,
 }
 
@@ -136,6 +153,7 @@ impl StorePathReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct FixedPathReport {
+  /// Full fixed-output store path.
   pub path: String,
 }
 
