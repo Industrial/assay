@@ -44,7 +44,7 @@
     # Preserve this repo's Moon gate composition (not the shared ci-* defaults).
     preCommitTargets = ":format :check :lint :test";
     # :lint-effect (Dylint) runs on push and in CI only: its first run installs a nightly.
-    prePushTargets = ":format :check :lint :lint-effect :build :test :audit :check-docs";
+    prePushTargets = ":format :check :lint :lint-effect :build :test :audit :deny :check-docs";
   };
   cursor.features.git-hooks-prek.enable = true;
 
