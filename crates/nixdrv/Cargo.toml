@@ -34,6 +34,14 @@ rstest = "0.23"
 nixq = { workspace = true, features = ["test-support"] }
 bin-contract-support.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+# Only nix-assay ships release binaries through cargo-dist.
+[package.metadata.dist]
+dist = false
+
 [lints]
 workspace = true
 

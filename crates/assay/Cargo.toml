@@ -36,6 +36,10 @@ id_effect_cli.workspace = true
 # Exposes the in-memory fakes (`MockNixEval`, `SyncEval`) for dependents' tests.
 test-support = ["nixstore/test-support"]
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true
 

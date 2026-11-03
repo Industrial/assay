@@ -35,6 +35,14 @@ bin-contract-support.workspace = true
 # Exposes `MockPathInfoStore` (in-memory fake) for dependents' tests.
 test-support = []
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+# Only nix-assay ships release binaries through cargo-dist.
+[package.metadata.dist]
+dist = false
+
 [lints]
 workspace = true
 
