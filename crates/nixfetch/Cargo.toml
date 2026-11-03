@@ -10,7 +10,8 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/nixfetch"
 readme = "README.md"
-exclude = ["fixtures/**"]
+# fixtures/ only feed bin_contract, which uses the unpublished workspace harness crate.
+exclude = ["fixtures/**", "tests/bin_contract.rs", "tests/golden/**"]
 keywords = ["nix", "fetch", "hash"]
 categories = ["development-tools", "command-line-utilities"]
 
@@ -36,6 +37,9 @@ tokio = { workspace = true, features = ["process", "sync"] }
 id_effect.workspace = true
 # The bin's run edge (`run_main`: Ctrl-C -> 130, defect -> 101); always linked.
 id_effect_cli.workspace = true
+
+[dev-dependencies]
+bin-contract-support.workspace = true
 
 [features]
 # Exposes the in-memory fakes (`MemFs`, `FakeHttp`, `FakeGit`) for dependents' tests.

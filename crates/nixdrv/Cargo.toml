@@ -10,6 +10,8 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/nixdrv"
 readme = "README.md"
+# bin_contract uses the unpublished workspace harness crate.
+exclude = ["tests/bin_contract.rs", "tests/golden/**"]
 keywords = ["nix", "derivation"]
 categories = ["development-tools", "command-line-utilities"]
 
@@ -30,6 +32,7 @@ id_effect_cli.workspace = true
 [dev-dependencies]
 rstest = "0.23"
 nixq = { workspace = true, features = ["test-support"] }
+bin-contract-support.workspace = true
 
 [lints]
 workspace = true

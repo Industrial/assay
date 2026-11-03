@@ -10,6 +10,8 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/nixq"
 readme = "README.md"
+# bin_contract reads nixstore's fixtures and the unpublished workspace harness crate.
+exclude = ["tests/bin_contract.rs", "tests/golden/**"]
 keywords = ["nix", "json", "query"]
 categories = ["development-tools", "command-line-utilities"]
 
@@ -26,6 +28,7 @@ id_effect_cli.workspace = true
 
 [dev-dependencies]
 nixstore = { workspace = true, features = ["test-support"] }
+bin-contract-support.workspace = true
 
 [features]
 # Exposes `MockJsonSource` (in-memory fake) for dependents' tests.

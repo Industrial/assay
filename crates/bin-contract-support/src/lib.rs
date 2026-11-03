@@ -4,28 +4,41 @@
 //! code and, when `golden` is set, compares stdout with
 //! `tests/golden/<case>.stdout`. The workspace path is normalized to
 //! `<WORKSPACE>`. Re-bless with `BLESS=1 cargo test -p <crate> --test bin_contract`.
+//!
+//! The suites read workspace files (sibling fixtures, `nix/assay/tests`), so they are
+//! excluded from the packaged crates; this crate is never published.
 
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+/// One pinned invocation of a binary.
+#[derive(Debug, Clone, Copy)]
 pub struct Case {
+  /// Test name; also the golden file stem (`tests/golden/<name>.stdout`).
   pub name: &'static str,
+  /// Command-line arguments.
   pub args: &'static [&'static str],
+  /// Bytes written to stdin, or `None` for a null stdin.
   pub stdin: Option<&'static str>,
+  /// Expected exit code.
   pub exit: i32,
+  /// Whether stdout is compared with the golden file.
   pub golden: bool,
 }
 
 /// One `#[test]` per case: `bin_case!(name, ["arg", ..], stdin: None, exit: 0, golden: true);`
+///
+/// Expects a `const BIN: &str` (the binary path, `env!("CARGO_BIN_EXE_<name>")`) in scope.
+#[macro_export]
 macro_rules! bin_case {
   ($name:ident, [$($arg:expr),* $(,)?], stdin: $stdin:expr, exit: $exit:expr, golden: $golden:expr) => {
     #[test]
     fn $name() {
-      support::check(
+      $crate::check(
         BIN,
         env!("CARGO_MANIFEST_DIR"),
-        &support::Case {
+        &$crate::Case {
           name: stringify!($name),
           args: &[$($arg),*],
           stdin: $stdin,
@@ -37,6 +50,12 @@ macro_rules! bin_case {
   };
 }
 
+/// Runs `bin` for `case` from `manifest_dir` and asserts its exit code and (golden) stdout.
+///
+/// # Panics
+///
+/// When the binary cannot be run, the exit code differs, or stdout differs from the golden
+/// file (or the golden file is missing). With `BLESS` set, writes the golden file instead.
 pub fn check(bin: &str, manifest_dir: &str, case: &Case) {
   let root = Path::new(manifest_dir);
   let mut child = Command::new(bin)
@@ -101,7 +120,7 @@ pub fn check(bin: &str, manifest_dir: &str, case: &Case) {
 }
 
 /// True when `program` runs (e.g. `nix` for suites that evaluate Nix).
-#[allow(dead_code)]
+#[must_use]
 pub fn has_program(program: &str) -> bool {
   Command::new(program)
     .arg("--version")

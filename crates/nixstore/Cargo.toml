@@ -10,6 +10,8 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/nixstore"
 readme = "README.md"
+# bin_contract uses the unpublished workspace harness crate.
+exclude = ["tests/bin_contract.rs", "tests/golden/**"]
 keywords = ["nix", "store"]
 categories = ["development-tools", "command-line-utilities"]
 
@@ -25,6 +27,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 id_effect.workspace = true
 # The bin's run edge (`run_main`: Ctrl-C -> 130, defect -> 101); always linked.
 id_effect_cli.workspace = true
+
+[dev-dependencies]
+bin-contract-support.workspace = true
 
 [features]
 # Exposes `MockPathInfoStore` (in-memory fake) for dependents' tests.

@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "crates/assay",
+  "crates/bin-contract-support",
   "crates/nixdrv",
   "crates/nixfetch",
   "crates/nixq",
@@ -25,6 +26,8 @@ homepage = "https://github.com/Industrial/assay"
 nixdrv = { path = "crates/nixdrv", version = "0.3.0" }
 nixq = { path = "crates/nixq", version = "0.3.0" }
 nixstore = { path = "crates/nixstore", version = "0.3.0" }
+# Test-only, unpublished: path-only so cargo strips it from packaged manifests.
+bin-contract-support = { path = "crates/bin-contract-support" }
 
 id_effect = "0.13.0"
 id_effect_cli = "0.13.0"

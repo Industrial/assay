@@ -1,9 +1,7 @@
 //! Pins the `nixfetch` binary's exit codes and stdout across the id_effect 0.13 port.
 //! fetch-url / fetch-git need network or git and stay covered by unit tests.
 
-#[macro_use]
-#[path = "../../../tests/support/bin_contract.rs"]
-mod support;
+use bin_contract_support::bin_case;
 
 const BIN: &str = env!("CARGO_BIN_EXE_nixfetch");
 const ZERO_SRI: &str = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";

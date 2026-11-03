@@ -10,6 +10,8 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/nix-assay"
 readme = "README.md"
+# bin_contract reads workspace files (nix/assay/tests) and the unpublished harness crate.
+exclude = ["tests/bin_contract.rs", "tests/golden/**"]
 keywords = ["nix", "testing", "unit-test", "dsl"]
 categories = ["development-tools", "command-line-utilities"]
 
@@ -50,3 +52,4 @@ path = "src/main.rs"
 id_effect = { workspace = true, features = ["schema-serde", "proptest"] }
 proptest = "1"
 nixstore = { workspace = true, features = ["test-support"] }
+bin-contract-support.workspace = true
