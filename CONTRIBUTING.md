@@ -77,9 +77,10 @@ job aggregates them and is the required check on `main`.
 
 - Use [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `docs:`,
   `refactor:`, `perf:`, `test:`, `ci:`, `chore:`; a scope is welcome (`fix(nixfetch): …`);
-  mark breaking changes with `!` or a `BREAKING CHANGE:` footer. release-plz derives the
-  version bump and the `CHANGELOG.md` entry from these, so write the subject for a user.
-- Do not edit `CHANGELOG.md` or crate versions by hand; the release PR does that.
+  mark breaking changes with `!` or a `BREAKING CHANGE:` footer.
+- Add an entry under `## [Unreleased]` in `CHANGELOG.md` for every user-visible change
+  (Added / Changed / Fixed / Removed / Security), written for a user. Crate versions change only
+  in a release PR ([docs/RELEASING.md](docs/RELEASING.md)).
 - Keep PRs focused. Fill in the PR template; update `docs/` and rustdoc when behaviour changes.
 - A change to a bin's exit codes or stdout is a contract change: update its goldens and
   `docs/cli.md` in the same PR, and say so in the description.

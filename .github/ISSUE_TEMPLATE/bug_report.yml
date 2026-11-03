@@ -36,7 +36,7 @@ body:
       options:
         - nix run / flake
         - cargo install
-        - release binary / shell installer
+        - release binary (GitHub release tarball)
         - built from source
     validations:
       required: true

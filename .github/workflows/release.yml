@@ -45,6 +45,10 @@ jobs:
             echo "::error file=Cargo.toml::tag $TAG does not match [workspace.package] version $version"
             exit 1
           fi
+          if ! grep -q "^ *version = \"$version\";" flake.nix; then
+            echo "::error file=flake.nix::package version is not $version"
+            exit 1
+          fi
           if ! grep -q "^## \[$version\]" CHANGELOG.md; then
             echo "::error file=CHANGELOG.md::no '## [$version]' section"
             exit 1

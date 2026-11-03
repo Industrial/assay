@@ -64,8 +64,8 @@ when Rust or Nix DSL code changed. The pre-push hook mirrors CI.
 - **Metadata and versions** inherit from `[workspace.package]`; all five crates share one
   version.
 - **Conventional Commits** (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `ci:`, `chore:`;
-  `!` for breaking). release-plz derives the version bump and CHANGELOG from them — do not
-  edit `CHANGELOG.md` or versions by hand.
+  `!` for breaking). User-visible changes also get an entry under `## [Unreleased]` in
+  `CHANGELOG.md`; versions change only in a release PR ([docs/RELEASING.md](docs/RELEASING.md)).
 - Match existing code style; use established libraries before adding new ones.
 - Surgical edits only — touch what the task requires.
 

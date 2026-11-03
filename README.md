@@ -15,9 +15,11 @@ human / JSON / TAP formats.
 # Nix (no install)
 nix run github:Industrial/assay -- run path/to/suite.assay.nix
 
-# Prebuilt binary (Linux / macOS, x86_64 and aarch64)
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/Industrial/assay/releases/latest/download/nix-assay-installer.sh | sh
+# Prebuilt binary: x86_64 / aarch64, unknown-linux-gnu / apple-darwin
+t=x86_64-unknown-linux-gnu
+gh release download --repo Industrial/assay --pattern "assay-$t.tar.gz*"
+shasum -a 256 -c "assay-$t.tar.gz.sha256" && tar -xzf "assay-$t.tar.gz"
+install -m 0755 "assay-$t/assay" ~/.local/bin/assay
 
 # Cargo
 cargo install nix-assay --locked   # installs the `assay` binary

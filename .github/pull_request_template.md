@@ -4,7 +4,8 @@
 
 ## Checklist
 
-- [ ] PR title and commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:` …; `!` for breaking). release-plz builds the CHANGELOG from them, so `CHANGELOG.md` is not edited by hand
+- [ ] PR title and commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:` …; `!` for breaking)
+- [ ] User-visible changes have an entry under `## [Unreleased]` in `CHANGELOG.md`
 - [ ] Gates pass locally: `moon run :ci-format :check :lint :lint-effect :test :check-docs :deny` (the pre-push hook runs them)
 - [ ] `moon run :assay` passes, if the runner or the Nix DSL changed
 - [ ] Tests added or updated (see [TESTING.md](../TESTING.md))

@@ -1,53 +1,59 @@
 # Releasing
 
-Releases are automated: [release-plz](https://release-plz.dev) prepares and publishes the
-crates, [cargo-dist](https://opensource.axo.dev/cargo-dist/) builds the binaries. All five crates
-(`nix-assay`, `nixq`, `nixdrv`, `nixstore`, `nixfetch`) share one version and one
-`CHANGELOG.md` ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)).
+A release is a `v<version>` tag on `main`. Pushing the tag runs
+[`.github/workflows/release.yml`](../.github/workflows/release.yml), which builds the binaries,
+creates the GitHub release and publishes the crates. All five crates (`nix-assay`, `nixq`,
+`nixdrv`, `nixstore`, `nixfetch`) share one version and one `CHANGELOG.md`
+([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)).
 
-## The normal flow
+## Prepare the release PR
 
-1. **Merge to `main`** using [Conventional Commits](https://www.conventionalcommits.org/).
-   release-plz reads them to pick the bump (`fix:` → patch, `feat:` → minor; while on `0.x`,
-   a breaking change `!` → minor) and to write the changelog entry.
-2. **Review the release PR.** On every push to `main`, release-plz opens or updates a PR that
-   bumps `[workspace.package] version` (and the sibling `version = "…"` requirements) and adds
-   the `CHANGELOG.md` section. Edit the changelog wording in that PR if needed; check that
-   `cargo semver-checks` in CI agrees with the bump.
-3. **Merge the release PR.** release-plz publishes the crates to crates.io in dependency order
-   and pushes the tag `v<version>` with a GitHub release.
-4. **The tag triggers cargo-dist**, which builds the release binaries for:
-   - `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`
-   - `x86_64-apple-darwin`, `aarch64-apple-darwin`
+1. Pick the version from the `## [Unreleased]` entries ([SemVer](https://semver.org/); while on
+   `0.x`, a breaking change bumps the minor). `cargo semver-checks` in CI is a second opinion.
+2. On a branch off an up-to-date `main`:
+   - set `[workspace.package] version` in `Cargo.toml`, and the `version` of the internal
+     crates in `[workspace.dependencies]`;
+   - set `version` in `flake.nix`;
+   - rename `## [Unreleased]` in `CHANGELOG.md` to `## [<version>] - <YYYY-MM-DD>`, start a new
+     empty `## [Unreleased]` above it, and add the compare link at the bottom;
+   - `cargo update --workspace` so the lockfile records the new versions.
+3. Commit `chore(release): <version>`, open a PR, and merge it once `ci-pass` is green.
 
-   and uploads to the GitHub release: archives with `.sha256` checksums, a shell installer,
-   and the legacy `assay-<target>.tar.gz` assets (a directory `assay-<target>/` holding the
-   `assay` binary) that Nix consumers fetch.
-5. **Bump Nix consumers** (see below).
-
-## Required secrets
-
-| Secret | Used by | Why |
-|--------|---------|-----|
-| `CARGO_REGISTRY_TOKEN` | release-plz | crates.io token with publish rights on all five crates |
-| `RELEASE_PLZ_TOKEN` | release-plz | a PAT or GitHub App token with `contents: write` and `pull-requests: write`. Tags pushed with the default `GITHUB_TOKEN` do not trigger other workflows, so without it the cargo-dist release never runs |
-
-## Verifying a release
+## Tag
 
 ```bash
-v=0.3.0   # the new version
+git switch main && git pull --ff-only
+v=0.3.1   # the new version
+git tag -a "v$v" -m "v$v"
+git push origin "v$v"
+```
 
-# crates.io: every crate at the new version
-for c in nix-assay nixq nixdrv nixstore nixfetch; do cargo search "$c" --limit 1; done
-cargo install nix-assay --locked --version "$v" && assay --version
+The workflow then runs, in order:
 
-# GitHub release assets and checksums
-gh release view "v$v" --repo Industrial/assay
-gh release download "v$v" --repo Industrial/assay --pattern '*.sha256' --pattern 'assay-x86_64-unknown-linux-gnu.tar.gz*'
+| Job | What it does |
+|-----|--------------|
+| `verify tag` | fails unless the tag equals `[workspace.package] version` and the `flake.nix` version, and `CHANGELOG.md` has a `## [<version>]` section; `cargo package --workspace --locked` |
+| `build` | `assay-<target>.tar.gz` (holding `assay-<target>/assay`) plus a `.sha256` for `x86_64`/`aarch64` `unknown-linux-gnu` and `x86_64`/`aarch64` `apple-darwin` |
+| `GitHub release` | runs only when every build passed: checks the checksums, writes `SHA256SUMS`, attests build provenance, creates the release with the CHANGELOG section as notes |
+| `crates.io` | `cargo publish --workspace --locked`, in dependency order, from the `crates-io` environment |
+
+## One-time setup
+
+- Secret `CARGO_REGISTRY_TOKEN` in the `crates-io` environment: a crates.io token with
+  publish rights on all five crates. Add required reviewers to the environment to make
+  publishing a manual approval.
+- Branch protection on `main` requiring the `ci-pass` check.
+
+## Verify a release
+
+```bash
+# GitHub release assets, checksums and provenance
+gh release download "v$v" --repo Industrial/assay --pattern 'assay-x86_64-unknown-linux-gnu.tar.gz*'
 sha256sum -c assay-x86_64-unknown-linux-gnu.tar.gz.sha256
+gh attestation verify assay-x86_64-unknown-linux-gnu.tar.gz --repo Industrial/assay
 
-# Installer and flake
-curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/Industrial/assay/releases/download/v$v/nix-assay-installer.sh" | sh
+# crates.io and the flake
+cargo install nix-assay --locked --version "$v" && assay --version
 nix run "github:Industrial/assay/v$v" -- --version
 ```
 
@@ -57,9 +63,8 @@ docs.rs builds each crate on publish; check `https://docs.rs/nix-assay/<version>
 
 The `program-assay.nix` module in
 [`Industrial/cursor-setup`](https://github.com/Industrial/cursor-setup) pins a version and the
-hash of the legacy `assay-x86_64-unknown-linux-gnu.tar.gz` asset (`releaseHash`); with
-`releaseHash = null` it falls back to `nix run github:Industrial/assay/v<version>`. After a
-release, bump it:
+hash of `assay-x86_64-unknown-linux-gnu.tar.gz` (`releaseHash`); with `releaseHash = null` it
+falls back to `nix run github:Industrial/assay/v<version>`. After a release, bump both:
 
 ```bash
 nix store prefetch-file --json \
@@ -67,30 +72,19 @@ nix store prefetch-file --json \
   | jq -r .hash
 ```
 
-and set `version` and `releaseHash` in cursor-setup. Also update the `version` in this repo's
-`flake.nix` if release-plz does not manage it.
+## When something fails
 
-## Manual or emergency release
+- **`verify tag` failed**: delete the tag (`git push --delete origin "v$v"; git tag -d "v$v"`),
+  fix `main`, and tag again. Nothing was published.
+- **A build failed**: nothing was released or published. Fix, delete and re-push the tag, or
+  re-run the failed jobs from the Actions tab if the failure was transient.
+- **`crates.io` failed part-way**: crates.io versions are immutable, so re-running stops at the
+  first crate already published. Publish the rest by hand, in order, after `cargo login`:
 
-Use this when automation is broken or a fix must ship without waiting for the release PR.
+  ```bash
+  cargo publish --locked -p nixfetch   # each crate not yet on crates.io:
+                                       # nixstore → nixq → nixdrv → nixfetch → nix-assay
+  ```
 
-1. On an up-to-date `main`, bump `[workspace.package] version` and the sibling dependency
-   versions in `crates/*/Cargo.toml`, add the `CHANGELOG.md` section, and commit
-   `chore(release): <version>` through a PR (CI must be green).
-2. Publish in dependency order (`nixstore` → `nixq` → `nixdrv` → `nixfetch` → `nix-assay`),
-   after `cargo login` with a crates.io token. `release-plz release` run locally does the
-   same (it reads the token from the `CARGO_REGISTRY_TOKEN` environment variable).
-
-   ```bash
-   cargo publish -p nixstore   # repeat per crate, in the order above
-   ```
-
-3. Tag and push; the tag runs cargo-dist as usual:
-
-   ```bash
-   git tag -a "v$v" -m "v$v" && git push origin "v$v"
-   ```
-
-4. If the dist workflow failed for a tag, fix it and re-run it from the Actions tab (or delete
-   the draft release and re-push the tag). Never re-publish a crate version: crates.io versions
-   are immutable — yank (`cargo yank --version <v> <crate>`) and release a new patch instead.
+- **A bad version shipped**: never re-publish it. Yank it
+  (`cargo yank --version <v> <crate>`) and release a new patch.
