@@ -71,10 +71,6 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
-# cargo-dist builds with this profile (dist-workspace.toml).
-[profile.dist]
-inherits = "release"
-
 # id_effect's Dylint lints, pinned to the id_effect release in use (`moon run :lint-effect`).
 [workspace.metadata.dylint]
 libraries = [
