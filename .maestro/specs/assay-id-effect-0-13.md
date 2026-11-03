@@ -13,7 +13,7 @@ acceptance_criteria:
   - 'Suite/claim decoding uses #[derive(Schema)] + decode_unknown_all -> ParseErrors (every error reported with its path); hand-written Schema::make codecs removed.'
   - 'One error enum per crate boundary with From widening; no anyhow in lib code; no unwrap/expect/println/unreachable! on effect paths.'
   - 'Tests use run_test + assert_exit_* / assert_golden_exit; timeout/retry tests use TestExecutor virtual time with exact-duration assertions; no wall-clock sleeps in tests; laws/claims property tests use testing::property (prop_check, from_schema).'
-  - 'id_effect_lints wired via Dylint (moon :lint + CI) with zero warnings.'
+  - 'id_effect_lints wired via Dylint (moon :lint-effect on pre-push + CI job lint-effect) with zero warnings. Amended in REVIEW: kept out of :lint / pre-commit because Dylint builds on a nightly toolchain.'
   - 'moon :check :lint :test :assay green; nix/assay smoke + dogfood suites produce verdicts identical to the W0 baseline.'
   - 'docs/cli.md documents the exit-code table per bin; workspace version bumped (D5); CHANGELOG entry.'
 non_goals:

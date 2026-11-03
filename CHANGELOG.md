@@ -49,6 +49,16 @@ smoke and dogfood suite verdicts are identical to 0.2.1.
 - `nixstore`: the SQLite connection is opened once per run (`layer(store_root)`) instead of per
   query; `assay` opens it only on the first `pathInfo` claim.
 
+### Fixed
+
+- `assay run` (batch mode): Ctrl-C no longer leaves `$TMPDIR/assay-batch-*` behind; the batch
+  temp dir is removed by a finalizer on every exit, interrupts included.
+
+### Security
+
+- `nixfetch fetch-git`: the URL is passed to `git clone` after `--`, so a URL such as
+  `--upload-pack=…` can no longer be read as a git option; a `--rev` starting with `-` is refused.
+
 ### Removed
 
 - `nix-assay`: the `proptest` cargo feature (property tests are dev-only now) and the `optics`

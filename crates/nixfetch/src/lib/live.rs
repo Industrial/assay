@@ -182,17 +182,26 @@ impl Git for LiveGit {
 }
 
 async fn git_checkout(url: String, rev: String, dest: PathBuf) -> Result<(), InfraError> {
+  // `checkout` has no `--` slot for a revision, so an option-like rev is refused outright.
+  if rev.starts_with('-') {
+    return Err(InfraError::GitCheckout {
+      rev,
+      message: "revision must not start with '-'".into(),
+    });
+  }
   let dest = dest.as_os_str();
+  // `--` keeps a URL such as `--upload-pack=...` from being read as a git option.
   let shallow = [
     OsStr::new("clone"),
     "--depth".as_ref(),
     "1".as_ref(),
+    "--".as_ref(),
     url.as_ref(),
     dest,
   ];
   if git(&shallow).await?.is_err() {
     // Retry without `--depth` (git removes the directory a failed clone created).
-    let full = [OsStr::new("clone"), url.as_ref(), dest];
+    let full = [OsStr::new("clone"), "--".as_ref(), url.as_ref(), dest];
     git(&full).await?.map_err(|message| InfraError::GitClone {
       url: url.clone(),
       message,
@@ -520,6 +529,31 @@ mod tests {
       expect_exit_failure(run_test(io.read_tree(&missing))),
       InfraError::Io { .. }
     ));
+    let _ = fs::remove_dir_all(&root);
+  }
+
+  #[test]
+  fn live_git_refuses_option_like_url_and_rev() {
+    let root = scratch("git-args");
+    let marker = root.join("pwned");
+    let url = format!("--upload-pack=touch {}", marker.display());
+    let clone = expect_exit_failure(LiveGit.checkout(&url, "HEAD", &root.join("a")).block_on());
+    assert!(matches!(clone, InfraError::GitClone { .. }), "{clone:?}");
+    assert!(
+      !marker.exists(),
+      "an option-like URL must not reach git as an option"
+    );
+
+    let rev = expect_exit_failure(
+      LiveGit
+        .checkout("unused", "--orphan", &root.join("b"))
+        .block_on(),
+    );
+    assert!(matches!(rev, InfraError::GitCheckout { .. }), "{rev:?}");
+    assert!(
+      !root.join("b").exists(),
+      "an option-like rev is refused before cloning"
+    );
     let _ = fs::remove_dir_all(&root);
   }
 }

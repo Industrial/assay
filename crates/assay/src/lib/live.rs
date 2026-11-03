@@ -98,7 +98,8 @@ pub struct LiveNixEval;
 enum Target {
   Expr(String),
   File(PathBuf),
-  Source(String),
+  /// The batch source, and where the task records the temp dir it creates for it.
+  Source(String, Arc<OnceLock<PathBuf>>),
 }
 
 impl NixEval for LiveNixEval {
@@ -113,8 +114,16 @@ impl NixEval for LiveNixEval {
   }
 
   fn eval_source(&self, source: &str) -> Effect<Value, AssayOutcome> {
-    let target = Target::Source(source.to_owned());
-    on_executor(move || nix_eval(target))
+    let created = Arc::new(OnceLock::new());
+    let target = Target::Source(source.to_owned(), Arc::clone(&created));
+    // The executor task may still be winding down when an interrupt ends the run, so the
+    // fiber removes the temp dir too: `ensuring` runs on every exit, before `run_main` returns.
+    on_executor(move || nix_eval(target)).ensuring(suspend(move || {
+      if let Some(dir) = created.get() {
+        let _ = std::fs::remove_dir_all(dir);
+      }
+      succeed(())
+    }))
   }
 }
 
@@ -122,15 +131,15 @@ async fn nix_eval(target: Target) -> Result<Value, AssayOutcome> {
   match target {
     Target::Expr(expr) => run_nix(&["--expr".as_ref(), expr.as_ref()], None).await,
     Target::File(path) => run_nix(&["--file".as_ref(), path.as_os_str()], Some(&path)).await,
-    Target::Source(source) => {
+    Target::Source(source, created) => {
       let dir = TempDir::create().await?;
+      let _ = created.set(dir.0.clone());
       let path = dir.0.join("batch.nix");
-      let out = match tokio::fs::write(&path, source).await {
+      // `dir` is removed on drop: after this match, or when the future is cancelled.
+      match tokio::fs::write(&path, source).await {
         Ok(()) => run_nix(&["--file".as_ref(), path.as_os_str()], Some(&path)).await,
         Err(e) => Err(io_outcome(&e.to_string())),
-      };
-      dir.remove().await;
-      out
+      }
     }
   }
 }
@@ -180,9 +189,13 @@ impl TempDir {
       }
     }
   }
+}
 
-  async fn remove(self) {
-    let _ = tokio::fs::remove_dir_all(&self.0).await;
+/// Removal lives in `Drop` so the directory also goes when the eval future is dropped
+/// mid-flight (an interrupt or timeout cancels it before any post-await cleanup runs).
+impl Drop for TempDir {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_dir_all(&self.0);
   }
 }
 
@@ -404,5 +417,26 @@ mod tests {
       expect_exit_failure(run_test(store.query("/nix/store/x-a", opts))),
       first
     );
+  }
+
+  #[test]
+  fn lazy_store_opens_a_real_database_once_and_answers_queries() {
+    let root =
+      std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../nixstore/fixtures/minimal");
+    let store = LazyPathInfoStore::new(root);
+    let opts = QueryOpts {
+      include_referrers: true,
+      include_closure_size: true,
+    };
+    let a = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a";
+    let info = expect_exit_success(run_test(store.query(a, opts)));
+    assert_eq!((info.path.as_str(), info.nar_size), (a, 100));
+    // The second query reuses the cached connection.
+    let again = expect_exit_success(run_test(store.query(a, opts)));
+    assert_eq!(again.nar_hash, info.nar_hash);
+    assert!(matches!(
+      expect_exit_failure(run_test(store.query("/nix/store/missing", opts))),
+      nixstore::InfraError::UnknownPath(_)
+    ));
   }
 }
