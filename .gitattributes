@@ -1,0 +1,14 @@
+# Normalize text to LF in the repository and in checkouts on every platform.
+* text=auto eol=lf
+
+# Byte-exact test data: never convert line endings (goldens are compared verbatim).
+crates/*/tests/golden/** -text
+crates/*/testdata/** -text
+crates/*/fixtures/** -text
+*.sqlite binary
+
+# Generated lockfiles: collapsed in GitHub diffs and excluded from language stats.
+Cargo.lock linguist-generated=true
+flake.lock linguist-generated=true
+devenv.lock linguist-generated=true
+uv.lock linguist-generated=true

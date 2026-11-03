@@ -18,7 +18,7 @@ Public docs: [../../docs/authoring.md](../../docs/authoring.md).
 
 Nix DSL reference: [../../nix/assay/README.md](../../nix/assay/README.md).
 
-Competitive comparison (measured): [COMPARISON.md](COMPARISON.md).
+Competitive comparison (measured): [docs/comparison.md](https://github.com/Industrial/assay/blob/main/docs/comparison.md).
 
 ## Architecture
 
@@ -65,7 +65,7 @@ Each capability is a trait whose methods return `Effect`, behind a service newty
 
 | Capability | Service (`caps.rs`) | Role | Live adapter |
 |------------|---------------------|------|--------------|
-| Nix evaluator | `NixEvalService` (`NixEval`) | suite / compat load, batch and per-claim eval | `LiveNixEval` (`nix eval` via `tokio::process`, killed on interrupt — see [SPIKE.md](SPIKE.md)) |
+| Nix evaluator | `NixEvalService` (`NixEval`) | suite / compat load, batch and per-claim eval | `LiveNixEval` (`nix eval` via `tokio::process`, killed on interrupt) |
 | Snapshot store | `SnapshotService` | golden read/write under `testdata/goldens/` | `SnapshotStore` over `Fs` |
 | Store path-info | `nixstore::PathInfoService` | `pathInfo` claims | `LazyPathInfoStore` (opens `db.sqlite` on the first query) |
 | Filesystem | `FsService` (`Fs`) | suite reads, discovery, snapshots | `LiveFs` (`std::fs` on the executor's blocking pool) |
@@ -147,7 +147,7 @@ devenv shell -- cargo clippy -p nix-assay --all-targets -- -D warnings
 
 The runner is on id_effect 0.13 (MSRV 1.94); see [CHANGELOG.md](../../CHANGELOG.md). The Nix DSL in `nix/assay/` is stable as **data**.
 
-Evaluator backend: process-isolated `nix eval` is the v1 Live provider; the Nix C API remains **optional** (see [SPIKE.md](SPIKE.md)).
+Evaluator backend: process-isolated `nix eval` is the v1 Live provider; the Nix C API remains **optional**.
 
 ## Related tools in devenv
 

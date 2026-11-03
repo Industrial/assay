@@ -32,6 +32,7 @@ pub mod prop;
 pub mod report;
 pub mod run;
 pub mod schema;
+/// Rust-side evaluation of a tiny subset of Nix expressions (literals and `+`).
 pub mod simple_eval;
 pub mod snapshot;
 pub mod verdict;
@@ -84,7 +85,6 @@ mod id_effect_dep_smoke {
     assert!(matches!(exit, Exit::Success(())));
   }
 
-  #[cfg(feature = "cli-exit")]
   #[test]
   fn id_effect_cli_exit_code_linked() {
     use id_effect_cli::exit_code_for_exit;

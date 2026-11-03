@@ -1,9 +1,7 @@
 //! Pins the `assay` binary's exit codes and stdout across the id_effect 0.13 port.
 //! The smoke/dogfood goldens double as the verdict baseline for the in-repo DSL suites.
 
-#[macro_use]
-#[path = "../../../tests/support/bin_contract.rs"]
-mod support;
+use bin_contract_support::{self as support, bin_case};
 
 const BIN: &str = env!("CARGO_BIN_EXE_assay");
 

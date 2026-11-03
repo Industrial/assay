@@ -12,15 +12,20 @@ use crate::verdict::InfraError;
 /// A discovered suite file and its kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuiteFile {
+  /// Path of the suite file.
   pub path: PathBuf,
+  /// How the file is loaded.
   pub kind: SuiteKind,
 }
 
 /// Kind of suite file discovered on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuiteKind {
+  /// Compat JSON suite (`suite.json`, or `.json` under a compat fixtures dir).
   CompatJson,
+  /// Compat Nix suite (`.nix` under a compat fixtures dir).
   CompatNix,
+  /// Native assay suite (`*.assay.nix` or `*.assay.json`).
   AssayNix,
 }
 

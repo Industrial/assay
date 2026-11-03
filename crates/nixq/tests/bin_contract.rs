@@ -1,8 +1,6 @@
 //! Pins the `nixq` binary's exit codes and stdout across the id_effect 0.13 port.
 
-#[macro_use]
-#[path = "../../../tests/support/bin_contract.rs"]
-mod support;
+use bin_contract_support::bin_case;
 
 const BIN: &str = env!("CARGO_BIN_EXE_nixq");
 const STORE: &str = "../nixstore/fixtures/minimal";

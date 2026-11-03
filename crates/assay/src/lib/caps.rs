@@ -101,6 +101,7 @@ pub struct FakeStore;
 
 #[cfg(any(test, feature = "test-support"))]
 impl FakeStore {
+  /// Whether import-from-derivation is allowed (never, for the fake store).
   pub fn allow_ifd(&self) -> bool {
     false
   }

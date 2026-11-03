@@ -554,6 +554,7 @@ impl HasSchema for SuiteCases {
 /// An assay suite: `{ name, cases = { <case> = <claim>; }; }` (`name` and other keys unread).
 #[derive(Debug, Clone, Schema)]
 pub struct AssaySuite {
+  /// The suite's claims, keyed by case name.
   pub cases: SuiteCases,
 }
 

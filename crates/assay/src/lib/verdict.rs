@@ -18,27 +18,45 @@ use crate::outcome::AssayOutcome;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum CaseVerdict {
+  /// The claim held.
   Pass,
+  /// The claim's assertion did not hold.
   AssertFail {
+    /// Claim kind that failed (e.g. `eq`, `subset`).
     claim: String,
+    /// Actual value, when there is one to show.
     left: Option<Value>,
+    /// Expected value, when there is one to show.
     right: Option<Value>,
+    /// Human-readable description of the mismatch.
     diff: String,
   },
+  /// Evaluation threw (or otherwise errored) where a value was expected.
   EvalThrow {
+    /// Error kind (e.g. `throw`, `recursion`).
     kind: String,
+    /// Error message.
     message: String,
   },
+  /// Evaluation threw as the claim expected (reported as a pass).
   ExpectedThrow,
+  /// The observed value differs from (or lacks) its golden snapshot.
   SnapshotMismatch {
+    /// Path of the golden file.
     path: String,
+    /// Description of the difference.
     diff: String,
   },
+  /// A property check found a counterexample.
   Counterexample {
+    /// Seed that reproduces the failure.
     seed: u64,
+    /// Shrunk failing input.
     shrunk: Value,
   },
+  /// The claim needs a feature the runner does not support.
   Unsupported {
+    /// The unsupported feature.
     feature: String,
   },
 }
@@ -57,7 +75,12 @@ pub enum InfraError {
   Capability(String),
   /// A case ran longer than `--case-timeout-ms`.
   #[error("case {case:?} timed out after {limit_ms} ms (raise --case-timeout-ms)")]
-  Timeout { case: String, limit_ms: u64 },
+  Timeout {
+    /// Name of the case that timed out.
+    case: String,
+    /// The timeout that was exceeded, in milliseconds.
+    limit_ms: u64,
+  },
   /// The runner itself failed (e.g. a malformed batch result).
   #[error("runner error: {0}")]
   Worker(String),

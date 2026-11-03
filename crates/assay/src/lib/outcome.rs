@@ -2,31 +2,52 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Result of running one assay case (legacy form; see [`crate::verdict`] for the `Exit` model).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum AssayOutcome {
+  /// The claim held.
   Pass,
+  /// The claim's assertion did not hold.
   Fail {
+    /// Claim kind that failed (e.g. `eq`, `subset`).
     claim: String,
+    /// Actual value, when there is one to show.
     left: Option<serde_json::Value>,
+    /// Expected value, when there is one to show.
     right: Option<serde_json::Value>,
+    /// Human-readable description of the mismatch.
     diff: String,
   },
+  /// Evaluation or runner error; `kind` selects how it maps to a verdict (e.g. `throw`,
+  /// `panic`, `io`, `suite_load`, `nix_missing`).
   EvalError {
+    /// Error kind.
     kind: String,
+    /// Error message.
     message: String,
+    /// Source location, when known.
     span: Option<String>,
   },
+  /// Evaluation hit infinite recursion.
   Recursion,
+  /// The case exceeded its time limit.
   Timeout,
+  /// A property check found a counterexample.
   Counterexample {
+    /// Seed that reproduces the failure.
     seed: u64,
+    /// Shrunk failing input.
     shrunk: serde_json::Value,
   },
+  /// The observed value differs from (or lacks) its golden snapshot.
   SnapshotMismatch {
+    /// Path of the golden file.
     path: String,
+    /// Description of the difference.
     diff: String,
   },
+  /// The case leaked a resource (treated as a defect).
   ResourceLeak,
 }
 

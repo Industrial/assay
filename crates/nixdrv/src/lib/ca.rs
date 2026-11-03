@@ -9,7 +9,9 @@ use crate::store_path::StorePath;
 /// How a fixed-output path was produced (flat file vs recursive NAR hash).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileIngestionMethod {
+  /// Hash of the file's contents directly.
   Flat,
+  /// Hash of the NAR serialisation of the path.
   Recursive,
 }
 

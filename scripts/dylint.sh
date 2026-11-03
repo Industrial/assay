@@ -49,7 +49,9 @@ fi
 lints_src="target/dylint/id_effect-$ID_EFFECT_TAG"
 if [[ ! -d "$lints_src/lints/id_effect_lints" ]]; then
     rm -rf "$lints_src"
-    git clone --quiet --depth 1 --branch "$ID_EFFECT_TAG" -c advice.detachedHead=false \
+    # In a git hook GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE point at this repo; clear them so
+    # the clone gets its own repository.
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR git clone --quiet --depth 1 --branch "$ID_EFFECT_TAG" -c advice.detachedHead=false \
         https://github.com/Industrial/id_effect "$lints_src"
 fi
 

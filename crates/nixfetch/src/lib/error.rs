@@ -12,34 +12,85 @@ use thiserror::Error;
 /// ([`exit_code`](Self::exit_code)).
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum InfraError {
+  /// A filesystem operation failed; permanent.
   #[error("io error at {path}: {message}")]
-  Io { path: String, message: String },
+  Io {
+    /// Path the operation was on.
+    path: String,
+    /// Underlying I/O error message.
+    message: String,
+  },
   /// Connecting, TLS or reading the body failed (transient).
   #[error("http error for {url}: {message}")]
-  Http { url: String, message: String },
+  Http {
+    /// Requested URL.
+    url: String,
+    /// Underlying transport error message.
+    message: String,
+  },
   /// The server answered a non-2xx status (transient for 5xx, 408 and 429).
   #[error("http error for {url}: status {status}")]
-  HttpStatus { url: String, status: u16 },
+  HttpStatus {
+    /// Requested URL.
+    url: String,
+    /// HTTP status code of the answer.
+    status: u16,
+  },
   /// The request could not be built (e.g. an invalid URL); permanent.
   #[error("invalid http request for {url}: {message}")]
-  HttpRequest { url: String, message: String },
+  HttpRequest {
+    /// URL the request was for.
+    url: String,
+    /// Why the request could not be built.
+    message: String,
+  },
   /// `git clone` failed (transient: usually the network or the remote).
   #[error("git clone of {url} failed: {message}")]
-  GitClone { url: String, message: String },
+  GitClone {
+    /// Repository URL.
+    url: String,
+    /// Git's error output.
+    message: String,
+  },
+  /// `git checkout <rev>` failed after a successful clone (usually an unknown rev); permanent.
   #[error("git checkout of {rev} failed: {message} (is the rev in the repository?)")]
-  GitCheckout { rev: String, message: String },
+  GitCheckout {
+    /// Revision that was checked out.
+    rev: String,
+    /// Git's error output.
+    message: String,
+  },
+  /// The `git` process could not be started; permanent.
   #[error("cannot run git: {0} (is git installed and on PATH?)")]
   GitSpawn(String),
   /// One attempt ran longer than its timeout (transient: the next attempt may be faster).
   #[error("{what}: attempt timed out after {after:?}")]
-  Timeout { what: String, after: Duration },
+  Timeout {
+    /// Operation that timed out (e.g. `GET <url>`).
+    what: String,
+    /// The per-attempt timeout that elapsed.
+    after: Duration,
+  },
   /// All attempts together ran longer than the overall timeout; not retried.
   #[error("{what}: gave up after {after:?} (overall timeout)")]
-  Deadline { what: String, after: Duration },
+  Deadline {
+    /// Operation that was given up on.
+    what: String,
+    /// The overall timeout that elapsed.
+    after: Duration,
+  },
+  /// An expected hash or a derivation/store-path input could not be parsed; permanent.
   #[error("parse error: {0}")]
   Parse(String),
+  /// The computed digest differs from the expected hash (exit code 1).
   #[error("hash mismatch: expected {expected}, got {actual}")]
-  HashMismatch { expected: String, actual: String },
+  HashMismatch {
+    /// Expected hash (SRI, or 32-char nix32 when a compressed hash was given).
+    expected: String,
+    /// Computed hash, in the same spelling as `expected`.
+    actual: String,
+  },
+  /// Serialising the command result to JSON failed.
   #[error("cannot render output as JSON: {0}")]
   Render(String),
 }

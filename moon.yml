@@ -14,31 +14,27 @@ tasks:
     command: 'treefmt'
     inputs:
       - 'treefmt.toml'
-      - '.git/**/*'
       - '**/*.rs'
       - '**/*.nix'
       - '**/*.sh'
       - '**/*.{js,jsx,ts,tsx,json}'
       - '**/*.{yml,yaml}'
       - '**/*.toml'
-      - '.github/workflows/*.yml'
     options:
       cache: false
       outputStyle: buffer-only-failure
   ci-format:
-    description: 'Format check for CI (treefmt with fail-on-change)'
+    description: 'Format check for CI: fails if treefmt would change any file'
     command: 'treefmt'
-    args: ['--config-file', 'treefmt.ci.toml']
+    args: ['--fail-on-change']
     inputs:
-      - 'treefmt.ci.toml'
-      - '.git/**/*'
+      - 'treefmt.toml'
       - '**/*.rs'
       - '**/*.nix'
       - '**/*.sh'
       - '**/*.{js,jsx,ts,tsx,json}'
       - '**/*.{yml,yaml}'
       - '**/*.toml'
-      - '.github/workflows/*.yml'
     options:
       cache: false
       outputStyle: buffer-only-failure
@@ -51,11 +47,22 @@ tasks:
       - 'Cargo.lock'
     options:
       outputStyle: buffer-only-failure
-  coverage:
-    description: 'Run tests with llvm-cov and generate HTML coverage report'
+  deny:
+    description: 'Run cargo deny (advisories, licenses, bans, sources; deny.toml)'
     command: 'cargo'
-    args: ['llvm-cov', 'nextest']
-    deps: ['~:format']
+    args: ['deny', 'check']
+    inputs:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/*/Cargo.toml'
+      - 'deny.toml'
+    options:
+      cache: false
+      outputStyle: buffer-only-failure
+  coverage:
+    description: 'Run tests under llvm-cov (nextest coverage profile)'
+    command: 'cargo'
+    args: ['llvm-cov', 'nextest', '--workspace', '--all-features', '--profile', 'coverage']
     inputs:
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -65,7 +72,7 @@ tasks:
   build:
     description: 'Build the workspace with cargo'
     command: 'cargo'
-    args: ['build']
+    args: ['build', '--workspace']
     inputs:
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -85,12 +92,15 @@ tasks:
       cache: true
       outputStyle: buffer-only-failure
   lint:
-    description: 'Run fmt --check and clippy'
+    description: 'Run fmt --check and clippy on every target (-D warnings)'
     command: 'bash'
-    args: ['-c', 'cargo fmt --all -- --check && cargo clippy --workspace -- -D warnings']
+    args:
+      - '-c'
+      - 'cargo fmt --all -- --check && cargo clippy --workspace --all-targets --all-features -- -D warnings'
     inputs:
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'clippy.toml'
       - '**/*.rs'
     options:
       outputStyle: buffer-only-failure
@@ -106,27 +116,54 @@ tasks:
     options:
       outputStyle: buffer-only-failure
   test:
-    description: 'Run tests with nextest'
+    description: 'Run tests with nextest (NEXTEST_PROFILE=ci in CI), after the doctests'
     command: 'cargo'
-    args: ['nextest', 'run']
+    args: ['nextest', 'run', '--workspace', '--all-features']
+    deps: ['~:test-doc']
+    inputs:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.config/nextest.toml'
+      - '**/*.rs'
+      - 'crates/**/*'
+      - 'nix/**/*'
+    options:
+      cache: false
+      outputStyle: buffer-only-failure
+  test-doc:
+    description: 'Run doctests (nextest does not run them)'
+    command: 'cargo'
+    args: ['test', '--doc', '--workspace', '--all-features']
     inputs:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '**/*.rs'
-      - 'tests/**/*'
     options:
       cache: false
       outputStyle: buffer-only-failure
   docs:
     description: 'Build documentation'
     command: 'cargo'
-    args: ['doc', '--no-deps', '--all-features']
+    args: ['doc', '--workspace', '--no-deps', '--all-features']
     inputs:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '**/*.rs'
     options:
       cache: true
+      outputStyle: buffer-only-failure
+  check-docs:
+    description: 'Build docs; any rustdoc warning (broken link, bad markup) fails'
+    command: 'cargo'
+    args: ['doc', '--workspace', '--no-deps', '--all-features']
+    env:
+      RUSTDOCFLAGS: '-D warnings'
+    inputs:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '**/*.rs'
+      - '**/*.md'
+    options:
       outputStyle: buffer-only-failure
   fix:
     description: 'Auto-fix with cargo fix and clippy --fix'
@@ -138,28 +175,6 @@ tasks:
       - '**/*.rs'
     options:
       cache: false
-      outputStyle: buffer-only-failure
-  bench:
-    description: 'Run benchmarks (no-op if no benches)'
-    command: 'bash'
-    args: ['-c', 'if [ -d benches ]; then cargo bench; else echo "No benches/ directory"; fi']
-    inputs:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '**/*.rs'
-      - 'benches/**/*'
-    options:
-      cache: false
-      outputStyle: buffer-only-failure
-  check-docs:
-    description: 'Build docs and run clippy (-D warnings)'
-    command: 'bash'
-    args: ['-c', 'RUSTDOCFLAGS="" cargo doc --all-features --no-deps 2>&1 | tee log/docs-warnings.log | grep -E "(warning|error|Documenting|Finished)" || true && cargo clippy --lib --all-features -- -D warnings']
-    inputs:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '**/*.rs'
-    options:
       outputStyle: buffer-only-failure
   assay:
     description: 'Run in-repo Assay DSL smoke + dogfood suites'

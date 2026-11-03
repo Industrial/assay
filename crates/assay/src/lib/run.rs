@@ -61,10 +61,12 @@ impl fmt::Debug for Trace {
   }
 }
 
+/// Options for an `assay run`.
 #[derive(Debug, Clone)]
 pub struct RunOptions {
   /// `--update-snapshots` (applied at the edge, where the snapshot store is built).
   pub update_snapshots: bool,
+  /// Whether the report is rendered as JSON (set by the CLI for the JSON report format).
   pub json_output: bool,
   /// Per-case timeout budget in milliseconds (`None` = no limit).
   pub case_timeout_ms: Option<u64>,
@@ -74,6 +76,7 @@ pub struct RunOptions {
   pub batch_eval: bool,
   /// How many cases (and suite loads) run at once.
   pub jobs: usize,
+  /// Sink for `ASSAY_TRACE` progress notes (off by default).
   pub trace: Trace,
 }
 
@@ -99,6 +102,7 @@ impl Default for RunOptions {
 /// Every case of a run with its `Exit`, sorted by case name.
 #[derive(Debug, Clone)]
 pub struct SuiteReport {
+  /// `(case name, exit)` pairs, sorted by case name.
   pub outcomes: Vec<(String, Exit<CaseVerdict, InfraError>)>,
 }
 
@@ -123,11 +127,16 @@ impl SuiteReport {
   }
 }
 
+/// Case counts of a run, by outcome class.
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 pub struct RunSummary {
+  /// Number of cases.
   pub total: usize,
+  /// Cases that passed.
   pub passed: usize,
+  /// Cases whose claim did not hold (assertion, snapshot or counterexample failures).
   pub failed: usize,
+  /// Cases that errored (eval errors, recursion, timeouts, resource leaks).
   pub errored: usize,
 }
 
@@ -302,10 +311,12 @@ fn run_case(
   case.exit::<InfraError>().map(move |exit| (name, exit))
 }
 
+/// The [`RunSummary`] of `report`.
 pub fn summarize(report: &SuiteReport) -> RunSummary {
   summarize_exits(&report.outcomes)
 }
 
+/// Counts `outcomes` into a [`RunSummary`] (classified via their legacy [`AssayOutcome`]).
 pub fn summarize_exits(outcomes: &[(String, Exit<CaseVerdict, InfraError>)]) -> RunSummary {
   let mut s = RunSummary {
     total: outcomes.len(),

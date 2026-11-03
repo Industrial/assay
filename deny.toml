@@ -1,57 +1,37 @@
-# cargo-deny configuration
-# https://embarkstudios.github.io/cargo-deny/
+# cargo-deny configuration — https://embarkstudios.github.io/cargo-deny/
+# Run: `cargo deny check` (`moon run :deny`, pre-push, CI).
+
+[graph]
+all-features = true
 
 [advisories]
-db-path = "~/.cargo/advisory-db"
-db-urls = ["https://github.com/rustsec/advisory-db"]
+# Vulnerabilities and unsound advisories always fail; unmaintained only for direct deps.
 unmaintained = "workspace"
-yanked = "warn"
-
-# Allow known vulnerabilities with no fix available
-# RUSTSEC-2023-0071: rsa crate vulnerability in sqlx-mysql transitive dependency
-# No fixed upgrade available as of 2024. This is a medium severity timing sidechannel
-# issue that doesn't affect typical database query use cases.
-ignore = [
-  { id = "RUSTSEC-2023-0071", reason = "Transitive dependency of sqlx-mysql with no fix available" },
-]
+yanked = "deny"
+ignore = []
 
 [licenses]
-# List of explicitly allowed licenses
+# Only the licenses the current dependency graph actually uses.
+# CDLA-Permissive-2.0: webpki-roots (Mozilla CA bundle, via reqwest/rustls in nixfetch).
 allow = [
-  "MIT",
-  "MIT-0",
   "Apache-2.0",
-  "Apache-2.0 WITH LLVM-exception",
-  "BSD-2-Clause",
   "BSD-3-Clause",
+  "CDLA-Permissive-2.0",
   "ISC",
-  "Zlib",
-  "CC0-1.0",
-  "Unicode-DFS-2016",
+  "MIT",
   "Unicode-3.0",
-  "BSL-1.0",
-  "MPL-2.0",
-  "CC-BY-SA-4.0",
 ]
 confidence-threshold = 0.8
 
-[[licenses.clarify]]
-name = "ring"
-expression = "MIT AND ISC AND OpenSSL"
-license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
-
 [bans]
 multiple-versions = "warn"
-wildcards = "allow"
+wildcards = "deny"
+# Workspace path deps are fine; published crates still need a `version` on them (cargo enforces it).
+allow-wildcard-paths = true
 highlight = "all"
-
-# Skip certain crates from duplicate detection
-skip = []
-
-# Skip tree of dependencies
-skip-tree = []
 
 [sources]
 unknown-registry = "deny"
-unknown-git = "warn"
+unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

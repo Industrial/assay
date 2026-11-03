@@ -13,6 +13,7 @@ use crate::model::{PathInfo, QueryOpts};
 
 /// Read path-info for store paths. Methods return effects that need nothing (`R = HNil`).
 pub trait PathInfoStore: Send + Sync {
+  /// Path-info for the store path `path`, computing the optional fields `opts` asks for.
   fn query(&self, path: &str, opts: QueryOpts) -> Effect<PathInfo, InfraError>;
 }
 
@@ -110,6 +111,7 @@ mod fake {
   }
 
   impl MockPathInfoStore {
+    /// Registers (or replaces) `info` under its `path`.
     pub fn set(&self, info: PathInfo) {
       self
         .paths

@@ -14,7 +14,9 @@ use crate::outcome::AssayOutcome;
 /// Result of evaluating a Nix expression to JSON (what the test fakes are scripted with).
 #[derive(Debug, Clone, PartialEq)]
 pub enum EvalResult {
+  /// Evaluation produced this JSON value.
   Ok(Value),
+  /// Evaluation failed with this outcome.
   Err(AssayOutcome),
 }
 
