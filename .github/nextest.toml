@@ -1,0 +1,18 @@
+# cargo-nextest config for CI (ci.yml passes it with --config-file unless the repo has a
+# .config/nextest.toml, nextest's own default location). https://nexte.st/docs/configuration/
+
+[profile.ci]
+# Retry once to surface (and report) flaky tests without failing on them silently.
+retries = 1
+# Run everything so the JUnit report lists every failure.
+fail-fast = false
+# Flag tests slower than 10s; kill them after 2 minutes.
+slow-timeout = { period = "10s", terminate-after = 12 }
+status-level = "skip"
+final-status-level = "flaky"
+failure-output = "immediate-final"
+success-output = "never"
+
+[profile.ci.junit]
+# target/nextest/ci/junit.xml
+path = "junit.xml"
