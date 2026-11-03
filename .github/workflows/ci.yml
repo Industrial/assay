@@ -70,21 +70,9 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: nextest
-      # nextest reads only .config/nextest.toml by itself (the root nextest.toml is never loaded
-      # and does not parse with current nextest). Use .config/nextest.toml when it has a ci profile, else
-      # .github/nextest.toml, and make sure the `ci` profile writes target/nextest/ci/junit.xml.
-      - name: Prepare nextest config
-        run: |
-          src=.config/nextest.toml
-          grep -qs '^\[profile\.ci\]' "$src" || src=.github/nextest.toml
-          cfg="$RUNNER_TEMP/nextest.toml"
-          cp "$src" "$cfg"
-          if ! grep -q '^\[profile\.ci\.junit\]' "$cfg"; then
-            printf '\n[profile.ci.junit]\npath = "junit.xml"\n' >> "$cfg"
-          fi
-          echo "NEXTEST_CONFIG=$cfg" >> "$GITHUB_ENV"
+      # Profile `ci` (.config/nextest.toml): retries, no fail-fast, target/nextest/ci/junit.xml.
       - name: cargo nextest
-        run: cargo nextest run --workspace --all-features --locked --profile ci --config-file "$NEXTEST_CONFIG"
+        run: cargo nextest run --workspace --all-features --locked --profile ci
       - name: doctests
         run: cargo test --doc --workspace --all-features --locked
       - name: Upload JUnit report

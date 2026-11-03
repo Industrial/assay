@@ -35,8 +35,8 @@ when Rust or Nix DSL code changed. The pre-push hook mirrors CI.
     or a `fake` module in `caps.rs` — in-memory fakes.
   - `tests/bin_contract.rs` + `tests/golden/*.stdout` — subprocess exit-code/stdout goldens.
   - `fixtures/`, `testdata/` — inputs and in-crate goldens.
-- `tests/support/bin_contract.rs` — the shared `bin_case!` harness, `#[path]`-included by
-  each crate's `tests/bin_contract.rs`.
+- `crates/bin-contract-support/` — the shared `bin_case!` harness (`publish = false`, a
+  path-only dev-dependency of each crate's `tests/bin_contract.rs`).
 - `nix/assay/` — the Nix DSL (`default.nix`) and its suites (`tests/smoke.assay.nix`,
   `tests/dogfood.assay.nix`); `nix/assert.nix` is the assertion library dogfood exercises.
 - `examples/quickstart/` — consumer example. `docs/` — user docs (`cli.md` holds the

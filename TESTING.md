@@ -54,7 +54,8 @@ round trips (`claims.rs`) and the shrinker (`prop.rs`). Enabled by the `proptest
 ## 4. Binary contract (subprocess goldens)
 
 `crates/<crate>/tests/bin_contract.rs` runs the real binary and pins its exit code and stdout.
-Each case is one line, using the shared harness in `tests/support/bin_contract.rs`:
+Each case is one line, using the shared harness in the unpublished `bin-contract-support` crate
+(`crates/bin-contract-support`):
 
 ```rust
 bin_case!(get_missing, ["get", "a.zz"], stdin: Some(r#"{"a":{"b":1}}"#), exit: 1, golden: true);
