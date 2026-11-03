@@ -59,6 +59,22 @@ unimplemented = "warn"
 unwrap_used = "warn"
 expect_used = "warn"
 
+# Line tables keep backtraces useful at a fraction of full debuginfo's size and link time.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+# cargo-dist builds with this profile (dist-workspace.toml).
+[profile.dist]
+inherits = "release"
+
 # id_effect's Dylint lints, pinned to the id_effect release in use (`moon run :lint-effect`).
 [workspace.metadata.dylint]
 libraries = [
