@@ -4,7 +4,7 @@ All notable changes to this workspace (`nix-assay`, `nixq`, `nixdrv`, `nixstore`
 are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the workspace uses [Semantic Versioning](https://semver.org/) with one shared version.
 
-## [0.3.0] - Unreleased
+## [0.3.0] - 2026-11-03
 
 Re-platform of every crate on [id_effect](https://github.com/Industrial/id_effect) 0.13.0 from
 crates.io (was 0.4). Capabilities are traits returning `Effect`, commands return typed outputs
@@ -108,5 +108,5 @@ smoke and dogfood suite verdicts are identical to 0.2.1.
 
 - `assay --version`; inter-crate dependency requirements and template pins aligned.
 
-[0.3.0]: https://github.com/Industrial/assay/compare/v0.2.1...HEAD
+[0.3.0]: https://github.com/Industrial/assay/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/Industrial/assay/releases/tag/v0.2.1
