@@ -12,6 +12,8 @@
   cursor.features.program-moon.enable = true;
   cursor.features.program-lean-ctx.enable = true;
   cursor.features.program-roam-code.enable = true;
+  # `./init.sh` and the .maestro/ harness need the maestro CLI.
+  cursor.features.program-maestro.enable = true;
   cursor.features.dotenv.enable = true;
   cursor.features.packages-base.enable = true;
   cursor.features.packages-rust-dev.enable = true;
