@@ -11,6 +11,7 @@ pub use crate::live::FsJsonSource;
 /// Read the raw bytes of a JSON input: a file, or stdin when the path is `-`. Methods return
 /// effects that need nothing (`R = HNil`).
 pub trait JsonSource: Send + Sync {
+  /// The bytes of `input` (stdin when it is `-`).
   fn read(&self, input: &Path) -> Effect<Vec<u8>, InfraError>;
 }
 
@@ -52,6 +53,7 @@ mod fake {
   }
 
   impl MockJsonSource {
+    /// Serves `bytes` for reads of `path`.
     pub fn set_file(&self, path: impl Into<PathBuf>, bytes: impl Into<Vec<u8>>) {
       self
         .files
@@ -60,6 +62,7 @@ mod fake {
         .insert(path.into(), bytes.into());
     }
 
+    /// Serves `bytes` for reads of `-` (stdin).
     pub fn set_stdin(&self, bytes: impl Into<Vec<u8>>) {
       *self.stdin.lock().unwrap_or_else(PoisonError::into_inner) = bytes.into();
     }

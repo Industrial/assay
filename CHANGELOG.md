@@ -4,6 +4,26 @@ All notable changes to this workspace (`nix-assay`, `nixq`, `nixdrv`, `nixstore`
 are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the workspace uses [Semantic Versioning](https://semver.org/) with one shared version.
 
+## [Unreleased]
+
+### Changed
+
+- Dependencies: `thiserror` 2 (was 1) in every crate; it is only a derive, so the error types'
+  API is unchanged. Shared dependency versions now live in `[workspace.dependencies]`.
+
+### Removed
+
+- The no-op `cli-exit` cargo feature (every crate) and the reserved, empty `process-pool`
+  feature (`nix-assay`). Dependents that name them in `features = [...]` must drop them;
+  the default feature set is now empty and behaviour is unchanged.
+- `nix-assay`: the unused `criterion` dev-dependency.
+
+### Fixed
+
+- `nixfetch fetch-git`: `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and the other
+  repository-locating variables are cleared for the `git` children, so running `nixfetch`
+  inside a git hook no longer clones into / checks out the surrounding repository.
+
 ## [0.3.0] - 2026-11-03
 
 Re-platform of every crate on [id_effect](https://github.com/Industrial/id_effect) 0.13.0 from
@@ -108,5 +128,6 @@ smoke and dogfood suite verdicts are identical to 0.2.1.
 
 - `assay --version`; inter-crate dependency requirements and template pins aligned.
 
+[Unreleased]: https://github.com/Industrial/assay/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/Industrial/assay/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/Industrial/assay/releases/tag/v0.2.1

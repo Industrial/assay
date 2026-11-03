@@ -22,6 +22,7 @@ use crate::predicate::{value_contains_subset, value_has_attrs};
 /// One JSON document as output (`get`, `normalize`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct JsonReport {
+  /// The document to print.
   pub value: Value,
 }
 
@@ -35,7 +36,9 @@ impl JsonReport {
 /// Result of `diff`: equal after normalization, or the structural diff lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffReport {
+  /// The documents are equal after normalization (exit `0`).
   Equal,
+  /// The documents differ; carries the structural diff lines (exit `1`).
   Differs(String),
 }
 

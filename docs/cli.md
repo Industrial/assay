@@ -49,8 +49,6 @@ Two codes are shared by all of them:
 - `130` — Ctrl-C (SIGINT): the running program is interrupted, its finalizers run (temp
   dirs removed, child processes such as `nix` and `git` killed), then the process exits.
 
-The `cli-exit` cargo feature is a no-op kept for compatibility; the mapping is always on.
-
 ### `assay`
 
 | Code | Meaning |

@@ -12,14 +12,18 @@ use crate::verdict::InfraError;
 /// What is at a path (symlinks followed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
+  /// A regular file.
   File,
+  /// A directory.
   Dir,
+  /// Anything else (e.g. a socket or device).
   Other,
 }
 
 /// One entry of a directory listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {
+  /// Full path of the entry.
   pub path: PathBuf,
   /// Whether the entry is (or links to) a directory.
   pub is_dir: bool,

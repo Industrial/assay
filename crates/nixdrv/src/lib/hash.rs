@@ -8,6 +8,7 @@ pub const NIX_BASE32_ALPHABET: &str = "0123456789abcdfghijklmnpqrsvwxyz";
 const HASH_LEN: usize = 20;
 const HASH_STR_LEN: usize = 32;
 
+/// Encode a 20-byte (compressed) hash as 32 nix-base32 characters; panics on other lengths.
 pub fn nix_base32_encode(data: &[u8]) -> String {
   assert_eq!(data.len(), HASH_LEN);
   let alphabet = NIX_BASE32_ALPHABET.as_bytes();
@@ -34,6 +35,7 @@ pub fn nix_base32_encode(data: &[u8]) -> String {
   out
 }
 
+/// Decode 32 nix-base32 characters back into a 20-byte hash.
 pub fn nix_base32_decode(encoded: &str) -> Result<[u8; HASH_LEN], ParseError> {
   if encoded.len() != HASH_STR_LEN {
     return Err(ParseError::Invalid {

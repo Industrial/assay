@@ -9,7 +9,9 @@ use crate::outcome::AssayOutcome;
 /// Whether the active evaluator can report forced attribute paths.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ForceSupport {
+  /// Force probes are unavailable, with the reason.
   Unsupported(&'static str),
+  /// The evaluator can report forced attribute paths.
   Supported,
 }
 
@@ -39,6 +41,7 @@ fn check_forces_with_support(support: ForceSupport, paths: &[String]) -> AssayOu
   }
 }
 
+/// Judge a `forces` claim with the default evaluator's [`force_support`]; never passes today.
 pub fn check_forces(_expr: &str, paths: &[String]) -> AssayOutcome {
   check_forces_with_support(force_support(), paths)
 }

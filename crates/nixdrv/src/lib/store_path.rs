@@ -4,15 +4,20 @@ use std::fmt;
 
 use crate::error::ParseError;
 
+/// Default Nix store directory.
 pub const DEFAULT_STORE_DIR: &str = "/nix/store";
 
+/// A store path split into its hash part and name (store directory not included).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorePath {
+  /// 32-character nix-base32 hash part.
   pub hash: String,
+  /// Name part after the first `-`.
   pub name: String,
 }
 
 impl StorePath {
+  /// Absolute path `<store_dir>/<hash>-<name>`.
   pub fn full_path(&self, store_dir: &str) -> String {
     format!("{store_dir}/{}-{}", self.hash, self.name)
   }
@@ -24,6 +29,7 @@ impl fmt::Display for StorePath {
   }
 }
 
+/// Parse `<store_dir>/<hash>-<name>`, validating a 32-char nix-base32 hash and non-empty name.
 pub fn parse_store_path(s: &str, store_dir: &str) -> Result<StorePath, ParseError> {
   let prefix = format!("{store_dir}/");
   let rest = s.strip_prefix(&prefix).ok_or_else(|| ParseError::Invalid {

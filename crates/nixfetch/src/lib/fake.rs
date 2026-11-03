@@ -28,7 +28,9 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// One scripted answer of a fake.
 #[derive(Debug, Clone)]
 pub enum Reply<T> {
+  /// Succeeds with this value.
   Ok(T),
+  /// Fails with this error.
   Fail(InfraError),
   /// Never answers (sleeps a virtual day): only a timeout ends the attempt.
   Hang,
@@ -325,6 +327,7 @@ impl MemFs {
     lock(&self.tree).node(path.as_ref()).ok()
   }
 
+  /// `true` when an entry exists at exactly `path`.
   pub fn exists(&self, path: impl AsRef<Path>) -> bool {
     lock(&self.tree).entries.contains_key(path.as_ref())
   }

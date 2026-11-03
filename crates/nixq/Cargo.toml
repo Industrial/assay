@@ -10,31 +10,33 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/nixq"
 readme = "README.md"
+# bin_contract reads nixstore's fixtures and the unpublished workspace harness crate.
+exclude = ["tests/bin_contract.rs", "tests/golden/**"]
 keywords = ["nix", "json", "query"]
 categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
-clap = { version = "4.4", features = ["derive"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-thiserror = "1.0"
-nixstore = { path = "../nixstore", version = "0.3.0" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+nixstore.workspace = true
 
-id_effect = "0.13.0"
+id_effect.workspace = true
 # The bin's run edge (`run_main`: Ctrl-C -> 130, defect -> 101); always linked.
-id_effect_cli = "0.13.0"
+id_effect_cli.workspace = true
 
 [dev-dependencies]
-nixstore = { path = "../nixstore", version = "0.3.0", features = [
-  "test-support",
-] }
+nixstore = { workspace = true, features = ["test-support"] }
+bin-contract-support.workspace = true
 
 [features]
-default = ["cli-exit"]
-# Kept for compatibility: id_effect_cli is no longer optional, so this is a no-op.
-cli-exit = []
 # Exposes `MockJsonSource` (in-memory fake) for dependents' tests.
 test-support = []
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]
 workspace = true

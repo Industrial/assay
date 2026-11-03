@@ -6,12 +6,26 @@ use thiserror::Error;
 /// predicate outcome.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum InfraError {
+  /// Reading an input file (or stdin) failed.
   #[error("io error at {path}: {message}")]
-  Io { path: String, message: String },
+  Io {
+    /// The file read, or `-` for stdin.
+    path: String,
+    /// The underlying I/O error.
+    message: String,
+  },
+  /// The input is not a single valid JSON document.
   #[error("json parse error in {path}: {message} (input must be one JSON document)")]
-  Json { path: String, message: String },
+  Json {
+    /// The file parsed, or `-` for stdin.
+    path: String,
+    /// The parser's error.
+    message: String,
+  },
+  /// The attrpath is malformed or does not resolve.
   #[error(transparent)]
   Path(#[from] PathError),
+  /// A store path-info query failed.
   #[error(transparent)]
   Store(#[from] nixstore::InfraError),
 }
@@ -19,8 +33,10 @@ pub enum InfraError {
 /// Attrpath parse / resolve failures.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum PathError {
+  /// The attrpath does not parse; carries the reason.
   #[error("invalid attrpath: {0}")]
   Invalid(String),
+  /// No value at the attrpath; carries the path.
   #[error("path not found: {0}")]
   NotFound(String),
 }
@@ -28,15 +44,19 @@ pub enum PathError {
 /// Predicate CLI outcome (exit 0 / 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PredicateResult {
+  /// The predicate holds (exit `0`).
   True,
+  /// The predicate does not hold (exit `1`).
   False,
 }
 
 impl PredicateResult {
+  /// `true` for [`PredicateResult::True`].
   pub fn as_bool(self) -> bool {
     matches!(self, Self::True)
   }
 
+  /// [`PredicateResult::True`] for `true`, [`PredicateResult::False`] otherwise.
   pub fn from_bool(v: bool) -> Self {
     if v { Self::True } else { Self::False }
   }

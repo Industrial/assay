@@ -4,6 +4,7 @@
 (`id_effect`). Catch throws per case, compare derivations safely, and report with
 human / JSON / TAP formats.
 
+[![CI](https://github.com/Industrial/assay/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Industrial/assay/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/nix-assay.svg)](https://crates.io/crates/nix-assay)
 [![docs.rs](https://docs.rs/nix-assay/badge.svg)](https://docs.rs/nix-assay)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -14,9 +15,17 @@ human / JSON / TAP formats.
 # Nix (no install)
 nix run github:Industrial/assay -- run path/to/suite.assay.nix
 
+# Prebuilt binary: x86_64 / aarch64, unknown-linux-gnu / apple-darwin
+t=x86_64-unknown-linux-gnu
+gh release download --repo Industrial/assay --pattern "assay-$t.tar.gz*"
+shasum -a 256 -c "assay-$t.tar.gz.sha256" && tar -xzf "assay-$t.tar.gz"
+install -m 0755 "assay-$t/assay" ~/.local/bin/assay
+
 # Cargo
 cargo install nix-assay --locked   # installs the `assay` binary
 ```
+
+`assay run` needs `nix` on `PATH`.
 
 More options: [docs/install.md](docs/install.md).
 
@@ -68,7 +77,6 @@ assay run my-suite.assay.nix
 ## Development
 
 ```bash
-devenv shell -- cargo test --workspace
 devenv shell -- moon run :format :check :test
 devenv shell -- moon run :assay   # DSL smoke + dogfood
 devenv shell -- moon run :lint-effect   # id_effect_lints via Dylint (also pre-push + CI)
@@ -76,10 +84,15 @@ devenv shell -- moon run :lint-effect   # id_effect_lints via Dylint (also pre-p
 
 `:lint-effect` runs [`scripts/dylint.sh`](scripts/dylint.sh). Its first run installs the
 lints' pinned nightly (rustup, under `.devenv/state/rustup`) and `cargo-dylint` /
-`dylint-link` 6.2.0 (under `.devenv/state/dylint-tools`). Outside devenv it needs `rustup`;
-install the tools yourself with
-`cargo +nightly-2026-08-20 install --locked cargo-dylint@6.2.0 dylint-link@6.2.0`.
-The workspace needs Rust 1.94+ (MSRV); see [CHANGELOG.md](CHANGELOG.md) for releases.
+`dylint-link` (under `.devenv/state/dylint-tools`); the script pins both versions. Outside
+devenv it needs `rustup` and installs the tools into cargo's default bin dir. The workspace needs Rust 1.94+ (MSRV; the toolchain is pinned in
+`rust-toolchain.toml`); see [CHANGELOG.md](CHANGELOG.md) for releases.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the gates to run and commit conventions,
+[TESTING.md](TESTING.md) for the test layers, and [SECURITY.md](SECURITY.md) to report a
+vulnerability.
 
 ## License
 

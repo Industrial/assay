@@ -1,54 +1,252 @@
+# CI for the assay workspace. Branch protection should require the single `ci-pass` check,
+# which fails unless every other job succeeded (semver-checks is advisory, see below).
 name: ci
 on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  RUST_BACKTRACE: "1"
+  RUSTUP_MAX_RETRIES: "10"
+defaults:
+  run:
+    shell: bash
 jobs:
-  test:
+  fmt:
+    name: fmt
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Check
-        run: cargo check --workspace
-      - name: id-effect doctor (one id_effect version)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The live-adapter tests shell out to `nix`.
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: nextest
+      # Profile `ci` (.config/nextest.toml): retries, no fail-fast, target/nextest/ci/junit.xml.
+      - name: cargo nextest
+        run: cargo nextest run --workspace --all-features --locked --profile ci
+      - name: doctests
+        run: cargo test --doc --workspace --all-features --locked
+      - name: Upload JUnit report
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-${{ matrix.os }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo doc --workspace --no-deps --all-features --locked
+  deny:
+    name: deny (${{ matrix.checks }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        checks: [advisories, bans licenses sources]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check ${{ matrix.checks }}
+          arguments: --all-features --locked
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read rust-version
+        id: msrv
         run: |
-          cargo install id_effect_tool --version 0.13.0 --locked
+          msrv=$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)
+          if [[ -z "$msrv" ]]; then
+            echo "::error file=Cargo.toml::no rust-version in [workspace.package]"
+            exit 1
+          fi
+          echo "MSRV: $msrv"
+          echo "version=$msrv" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo check --workspace --all-targets --all-features --locked
+  features:
+    name: feature powerset
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-hack
+      # No `--locked`: `--no-dev-deps` strips dev-dependencies from the manifests while it runs,
+      # which changes the resolved graph; cargo-hack restores manifests and lockfile afterwards.
+      - run: cargo hack check --workspace --feature-powerset --depth 2 --no-dev-deps
+  semver:
+    name: semver-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Advisory until the crates are on crates.io (ci-pass allows this job to fail).
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Find last release tag
+        id: baseline
+        run: |
+          tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD 2>/dev/null || true)
+          echo "baseline: ${tag:-<none>}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/setup-rust
+        if: steps.baseline.outputs.tag != ''
+      - uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
+        if: steps.baseline.outputs.tag != ''
+        with:
+          rust-toolchain: manual
+          baseline-rev: ${{ steps.baseline.outputs.tag }}
+  smoke:
+    name: nix smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo build -p nix-assay --release --locked
+      - run: ./target/release/assay run nix/assay/tests/smoke.assay.nix
+      - run: ./target/release/assay run nix/assay/tests/dogfood.assay.nix
+  doctor:
+    name: id-effect doctor
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      # Caches ~/.cargo/bin too, so the install below is a no-op on a warm cache.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo install id_effect_tool --version 0.13.0 --locked
+      - name: One id_effect version in the build
+        run: |
           id-effect doctor --json | tee doctor.json
           jq -e '.ok and any(.checks[]; .name == "versions" and .status == "pass")' doctor.json
-      - name: Test
-        run: cargo test --workspace
-      - name: Smoke (needs nix)
-        run: |
-          cargo build -p nix-assay --release
-          ./target/release/assay run nix/assay/tests/smoke.assay.nix
-          ./target/release/assay run nix/assay/tests/dogfood.assay.nix
   lint-effect:
+    name: id_effect_lints (Dylint)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Installs the lints' pinned nightly, cargo-dylint and dylint-link, then fails on any
       # id_effect_lints warning.
-      - name: id_effect_lints (Dylint)
-        run: scripts/dylint.sh
-  benchmark:
-    needs: test
+      - run: scripts/dylint.sh
+  ci-pass:
+    name: ci-pass
+    if: always()
+    needs:
+      - fmt
+      - clippy
+      - test
+      - docs
+      - deny
+      - msrv
+      - features
+      - semver
+      - smoke
+      - doctor
+      - lint-effect
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Benchmark
-        run: cargo bench
-      - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
+      - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
-          name: criterion-reports
-          path: target/criterion
-          if-no-files-found: ignore
+          allowed-failures: semver
+          jobs: ${{ toJSON(needs) }}

@@ -1,0 +1,4 @@
+# Clippy configuration; lint levels live in [workspace.lints.clippy] (Cargo.toml).
+# A failing unwrap/expect is the assertion in a test, so the two lints only apply outside tests.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

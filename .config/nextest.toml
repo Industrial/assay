@@ -1,0 +1,35 @@
+# cargo-nextest configuration — https://nexte.st/docs/configuration/
+#
+#   cargo nextest run --workspace --all-features              # local (default profile)
+#   cargo nextest run --workspace --all-features --profile ci # CI: retries + JUnit
+
+# Profile inheritance and `fail-fast = { max-fail = N }` need a recent nextest.
+nextest-version = { required = "0.9.100" }
+
+[profile.default]
+# Local runs: no retries, so a flaky test shows up as a failure instead of hiding.
+retries = 0
+# Stop scheduling new tests after a handful of failures.
+fail-fast = { max-fail = 5 }
+# Warn after 30s; kill a test stuck for 4 periods (2 min).
+slow-timeout = { period = "30s", terminate-after = 4 }
+failure-output = "immediate"
+success-output = "never"
+
+[profile.ci]
+# Retry transient failures (subprocess / `nix` timing); retried passes are reported as flaky.
+retries = 2
+# Run everything so CI reports every failure at once.
+fail-fast = false
+failure-output = "immediate-final"
+
+[profile.ci.junit]
+# Written to target/nextest/ci/junit.xml.
+path = "junit.xml"
+
+# `cargo llvm-cov nextest --profile coverage`: same policy as CI, own report dir.
+[profile.coverage]
+inherits = "ci"
+
+[profile.coverage.junit]
+path = "junit.xml"

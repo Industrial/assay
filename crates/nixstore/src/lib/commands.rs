@@ -10,13 +10,20 @@ use crate::caps::{NixstoreEnv, PathInfoService};
 use crate::error::InfraError;
 use crate::model::{PathInfo, QueryOpts, human_bytes};
 
+/// `path-info` output flags (mirroring `nix path-info`).
 #[derive(Debug, Clone, Default)]
 pub struct PathInfoFlags {
+  /// `--json`: print the Nix path-info JSON object instead of text lines.
   pub json: bool,
+  /// `-s`: add the NAR size column.
   pub size: bool,
+  /// `-S`: add the closure size column (computes the closure).
   pub closure_size: bool,
+  /// `-h`: print sizes as KiB/MiB/… instead of bytes.
   pub human_readable: bool,
+  /// `--sigs`: add the signatures column.
   pub sigs: bool,
+  /// `--referrers`: list each path's referrers (computes them).
   pub referrers: bool,
 }
 
@@ -33,6 +40,7 @@ impl PathInfoFlags {
 /// Result of `path-info`: one entry per requested path, in request order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathInfoReport {
+  /// Path-info per requested path, in request order.
   pub infos: Vec<PathInfo>,
 }
 

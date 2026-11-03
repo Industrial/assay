@@ -8,14 +8,28 @@ pub enum InfraError {
   /// Reading the input (file or stdin) failed.
   #[error(transparent)]
   Source(#[from] nixq::InfraError),
+  /// Input was neither an ATerm `Derive(...)` nor valid derivation JSON.
   #[error(
     "{input} is not a derivation: {message} (expected an ATerm `Derive(...)` or derivation JSON)"
   )]
-  Json { input: String, message: String },
+  Json {
+    /// Input name (file path or stdin label).
+    input: String,
+    /// Underlying JSON decode error message.
+    message: String,
+  },
+  /// ATerm derivation parsing failed.
   #[error("parse error: {0}")]
   Parse(#[from] ParseError),
+  /// A command-line argument had an invalid value.
   #[error("invalid {arg}: {message}")]
-  InvalidArg { arg: String, message: String },
+  InvalidArg {
+    /// Offending argument name (e.g. `--digest-hex`).
+    arg: String,
+    /// Why the value was rejected.
+    message: String,
+  },
+  /// Serialising the command result to JSON failed.
   #[error("cannot render output as JSON: {0}")]
   Render(String),
 }
@@ -23,14 +37,28 @@ pub enum InfraError {
 /// Derivation / ATerm parse failures.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum ParseError {
+  /// Input did not match the expected syntax at `offset`.
   #[error("unexpected token at offset {offset}: {message}")]
-  Unexpected { offset: usize, message: String },
+  Unexpected {
+    /// Byte offset into the input.
+    offset: usize,
+    /// What was expected or found.
+    message: String,
+  },
+  /// Input ended before the construct was complete.
   #[error("unexpected end of input at offset {offset}")]
-  Eof { offset: usize },
+  Eof {
+    /// Byte offset where input ended.
+    offset: usize,
+  },
+  /// A syntactically readable value is semantically invalid (bad store path, hash, algorithm, ...).
   #[error("invalid {what} at offset {offset}: {message}")]
   Invalid {
+    /// Byte offset into the input.
     offset: usize,
+    /// Kind of value that was invalid (e.g. `store path`, `hash`).
     what: String,
+    /// Why the value was rejected.
     message: String,
   },
 }

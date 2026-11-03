@@ -1,0 +1,14 @@
+[package]
+name = "bin-contract-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Test-only harness for the workspace's `tests/bin_contract.rs` suites (not published)"
+license.workspace = true
+repository.workspace = true
+# Path-only dev-dependency of the published crates: cargo drops it from their packaged manifests.
+publish = false
+
+[lints]
+workspace = true

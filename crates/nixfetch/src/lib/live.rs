@@ -213,9 +213,25 @@ async fn git_checkout(url: String, rev: String, dest: PathBuf) -> Result<(), Inf
     .map_err(|message| InfraError::GitCheckout { rev, message })
 }
 
+/// Variables git uses to locate a repository. When set (e.g. inside a git hook) they override
+/// `-C <dir>` and would point every command at the *outer* repository, so they are cleared.
+const GIT_REPO_ENV: &[&str] = &[
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_COMMON_DIR",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_PREFIX",
+];
+
 /// Runs `git args`: `Err` when git cannot be started, `Ok(Err(stderr))` when it fails.
 async fn git(args: &[&OsStr]) -> Result<Result<(), String>, InfraError> {
-  let out = tokio::process::Command::new("git")
+  let mut cmd = tokio::process::Command::new("git");
+  for var in GIT_REPO_ENV {
+    cmd.env_remove(var);
+  }
+  let out = cmd
     .args(args)
     .stdin(Stdio::null())
     .kill_on_drop(true)
@@ -434,11 +450,11 @@ mod tests {
     let repo = root.join("repo");
     fs::create_dir_all(&repo).expect("repo dir");
     let run = |args: &[&str]| {
-      let out = Command::new("git")
-        .args(args)
-        .current_dir(&repo)
-        .output()
-        .expect("run git");
+      let mut cmd = Command::new("git");
+      for var in GIT_REPO_ENV {
+        cmd.env_remove(var);
+      }
+      let out = cmd.args(args).current_dir(&repo).output().expect("run git");
       assert!(out.status.success(), "git {args:?}: {out:?}");
       String::from_utf8_lossy(&out.stdout).trim().to_owned()
     };

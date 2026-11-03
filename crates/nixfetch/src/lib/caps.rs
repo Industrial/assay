@@ -39,9 +39,20 @@ pub struct GitService(pub Arc<dyn Git>);
 /// entries are ordered by name).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsNode {
-  Regular { executable: bool, contents: Vec<u8> },
+  /// A regular file.
+  Regular {
+    /// Whether the file has the executable bit set.
+    executable: bool,
+    /// File contents.
+    contents: Vec<u8>,
+  },
+  /// A directory: entry names mapped to their nodes.
   Directory(BTreeMap<String, FsNode>),
-  Symlink { target: String },
+  /// A symbolic link.
+  Symlink {
+    /// Link target, as stored (not resolved).
+    target: String,
+  },
 }
 
 /// Filesystem access: hashing / NAR reads, download destinations and temp dirs.
@@ -52,6 +63,7 @@ pub trait PathIo: Send + Sync {
   fn read_tree(&self, path: &Path) -> Effect<FsNode, InfraError>;
   /// Writes `bytes` to `path`, creating missing parent directories.
   fn write_file(&self, path: &Path, bytes: Vec<u8>) -> Effect<(), InfraError>;
+  /// Creates `path` and any missing parent directories.
   fn create_dir_all(&self, path: &Path) -> Effect<(), InfraError>;
   /// Removes the file, symlink or directory tree at `path`; a missing `path` is not an error.
   fn remove_all(&self, path: &Path) -> Effect<(), InfraError>;

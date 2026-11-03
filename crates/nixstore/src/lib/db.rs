@@ -8,6 +8,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use crate::error::InfraError;
 use crate::model::{PathInfo, QueryOpts, db_hash_to_sri};
 
+/// Store root used when none is given (the database is under `var/nix/db`).
 pub const DEFAULT_STORE_ROOT: &str = "/nix";
 
 /// Resolve `{store}/var/nix/db/db.sqlite`.
@@ -28,6 +29,7 @@ pub fn open_db(db_path: &Path) -> Result<Connection, InfraError> {
   .map_err(|e| InfraError::Sqlite(e.to_string()))
 }
 
+/// Open the store database of `store_root` read-only (see [`db_path_for_store`]).
 pub fn open_store_db(store_root: &Path) -> Result<Connection, InfraError> {
   open_db(&db_path_for_store(store_root))
 }

@@ -9,7 +9,9 @@ use crate::error::InfraError;
 /// Options controlling which fields a query computes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QueryOpts {
+  /// Also compute [`PathInfo::referrers`] (paths that reference this one).
   pub include_referrers: bool,
+  /// Also compute [`PathInfo::closure_size`].
   pub include_closure_size: bool,
 }
 
@@ -17,20 +19,31 @@ pub struct QueryOpts {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PathInfo {
+  /// The store path (`/nix/store/<hash>-<name>`).
   pub path: String,
+  /// NAR hash in SRI form (`sha256-<base64>`).
   pub nar_hash: String,
+  /// NAR serialization size in bytes.
   pub nar_size: u64,
+  /// The `.drv` that produced the path, if recorded.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub deriver: Option<String>,
+  /// Registration time (Unix seconds).
   pub registration_time: i64,
+  /// Whether the path was built locally (trusted without signatures).
   pub ultimate: bool,
+  /// Signatures (`key-name:base64`).
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub signatures: Vec<String>,
+  /// Content-address assertion (e.g. `fixed:r:sha256:…`), if content-addressed.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub ca: Option<String>,
+  /// Store paths this path references.
   pub references: Vec<String>,
+  /// Store paths referencing this one, when [`QueryOpts::include_referrers`] is set.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub referrers: Option<Vec<String>>,
+  /// Total NAR size of the closure in bytes, when [`QueryOpts::include_closure_size`] is set.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub closure_size: Option<u64>,
 }
