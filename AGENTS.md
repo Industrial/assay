@@ -40,8 +40,8 @@ when Rust or Nix DSL code changed. The pre-push hook mirrors CI.
 - `nix/assay/` — the Nix DSL (`default.nix`) and its suites (`tests/smoke.assay.nix`,
   `tests/dogfood.assay.nix`); `nix/assert.nix` is the assertion library dogfood exercises.
 - `examples/quickstart/` — consumer example. `docs/` — user docs (`cli.md` holds the
-  exit-code tables). `scripts/` — `dylint.sh` and MCP wrappers. `contrib/cursor-setup/` — the
-  `program-assay.nix` module Nix consumers use.
+  exit-code tables). `scripts/` — `dylint.sh` and MCP wrappers. The `program-assay.nix` module
+  Nix consumers use lives upstream in `Industrial/cursor-setup`.
 - `.maestro/` — harness state (read `.maestro/AGENTS.md` first).
 
 ## Conventions
