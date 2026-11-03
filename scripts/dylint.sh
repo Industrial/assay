@@ -16,7 +16,8 @@ cd "$REPO_ROOT"
 # Keep in step with the tag in Cargo.toml and lints/id_effect_lints/rust-toolchain.toml there.
 ID_EFFECT_TAG="v0.13.0"
 LINTS_TOOLCHAIN="nightly-2026-08-20"
-DYLINT_VERSION="6.2.0"
+# >= 6.3.0: older drivers clone rust-clippy's `master`, which no longer exists (renamed `main`).
+DYLINT_VERSION="6.3.2"
 
 if ! command -v rustup >/dev/null; then
     if [[ -z "${ASSAY_RUSTUP_BIN:-}" ]]; then
@@ -38,7 +39,8 @@ if [[ -n "${DEVENV_STATE:-}" ]]; then
     tools_root="$DEVENV_STATE/dylint-tools"
     PATH="$tools_root/bin:$PATH"
 fi
-if ! command -v cargo-dylint >/dev/null || ! command -v dylint-link >/dev/null; then
+if ! command -v dylint-link >/dev/null \
+    || [[ "$(cargo-dylint dylint --version 2>/dev/null)" != *" $DYLINT_VERSION"* ]]; then
     # cargo-dylint's lockfile needs a newer rustc than the workspace MSRV: build it on the nightly.
     cargo "+$LINTS_TOOLCHAIN" install --locked ${tools_root:+--root "$tools_root"} \
         "cargo-dylint@$DYLINT_VERSION" "dylint-link@$DYLINT_VERSION"
