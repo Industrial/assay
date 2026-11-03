@@ -28,9 +28,6 @@ id_effect_cli.workspace = true
 nixstore = { workspace = true, features = ["test-support"] }
 
 [features]
-default = ["cli-exit"]
-# Kept for compatibility: id_effect_cli is no longer optional, so this is a no-op.
-cli-exit = []
 # Exposes `MockJsonSource` (in-memory fake) for dependents' tests.
 test-support = []
 

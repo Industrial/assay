@@ -60,7 +60,6 @@ mod id_effect_dep_smoke {
     assert!(matches!(exit, Exit::Success(())));
   }
 
-  #[cfg(feature = "cli-exit")]
   #[test]
   fn id_effect_cli_exit_code_linked() {
     use id_effect_cli::exit_code_for_exit;

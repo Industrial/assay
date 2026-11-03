@@ -11,6 +11,13 @@ and the workspace uses [Semantic Versioning](https://semver.org/) with one share
 - Dependencies: `thiserror` 2 (was 1) in every crate; it is only a derive, so the error types'
   API is unchanged. Shared dependency versions now live in `[workspace.dependencies]`.
 
+### Removed
+
+- The no-op `cli-exit` cargo feature (every crate) and the reserved, empty `process-pool`
+  feature (`nix-assay`). Dependents that name them in `features = [...]` must drop them;
+  the default feature set is now empty and behaviour is unchanged.
+- `nix-assay`: the unused `criterion` dev-dependency.
+
 ### Fixed
 
 - `nixfetch fetch-git`: `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and the other

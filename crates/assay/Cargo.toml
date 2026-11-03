@@ -31,10 +31,6 @@ id_effect = { workspace = true, features = ["schema-serde"] }
 id_effect_cli.workspace = true
 
 [features]
-default = ["cli-exit"]
-# Kept for compatibility: id_effect_cli is no longer optional, so this is a no-op.
-cli-exit = []
-process-pool = [] # reserved; id_effect_process not on crates.io yet
 # Exposes the in-memory fakes (`MockNixEval`, `SyncEval`) for dependents' tests.
 test-support = ["nixstore/test-support"]
 
@@ -50,7 +46,6 @@ name = "assay"
 path = "src/main.rs"
 
 [dev-dependencies]
-criterion = "0.8.2"
 # Property tests (laws, claim codec round trips) on `id_effect::testing::property`.
 id_effect = { workspace = true, features = ["schema-serde", "proptest"] }
 proptest = "1"

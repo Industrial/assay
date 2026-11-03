@@ -31,11 +31,6 @@ id_effect_cli.workspace = true
 rstest = "0.23"
 nixq = { workspace = true, features = ["test-support"] }
 
-[features]
-default = ["cli-exit"]
-# Kept for compatibility: id_effect_cli is no longer optional, so this is a no-op.
-cli-exit = []
-
 [lints]
 workspace = true
 

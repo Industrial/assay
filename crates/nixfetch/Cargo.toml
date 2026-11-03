@@ -38,9 +38,6 @@ id_effect.workspace = true
 id_effect_cli.workspace = true
 
 [features]
-default = ["cli-exit"]
-# Kept for compatibility: id_effect_cli is no longer optional, so this is a no-op.
-cli-exit = []
 # Exposes the in-memory fakes (`MemFs`, `FakeHttp`, `FakeGit`) for dependents' tests.
 test-support = []
 
