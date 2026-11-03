@@ -15,30 +15,27 @@ keywords = ["nix", "fetch", "hash"]
 categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
-base64 = "0.22"
-clap = { version = "4.4", features = ["derive"] }
-hex = "0.4"
-nixdrv = { path = "../nixdrv", version = "0.3.0" }
-nixstore = { path = "../nixstore", version = "0.3.0" }
+base64.workspace = true
+clap.workspace = true
+hex.workspace = true
+nixdrv.workspace = true
+nixstore.workspace = true
 # Async client: it runs as a task on the id_effect (tokio) executor; `reqwest::blocking` would
 # panic inside the runtime and park an executor thread.
 reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
 ] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = "0.10"
-thiserror = "1.0"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
 # `tokio::process` (git, killed when an attempt is dropped) and oneshot channels for the live
 # adapters; the runtime itself is id_effect's.
-tokio = { version = "1", default-features = false, features = [
-  "process",
-  "sync",
-] }
+tokio = { workspace = true, features = ["process", "sync"] }
 
-id_effect = "0.13.0"
+id_effect.workspace = true
 # The bin's run edge (`run_main`: Ctrl-C -> 130, defect -> 101); always linked.
-id_effect_cli = "0.13.0"
+id_effect_cli.workspace = true
 
 [features]
 default = ["cli-exit"]
